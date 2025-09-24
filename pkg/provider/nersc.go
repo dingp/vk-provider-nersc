@@ -219,6 +219,12 @@ func (p *NerscProvider) OperatingSystem() string {
     return "Linux"
 }
 
+func (p *NerscProvider) Ping(ctx context.Context) error {
+    // Simple health check - try to make a basic API call to verify connectivity
+    // This could be enhanced to actually ping the Superfacility API
+    return nil
+}
+
 func (p *NerscProvider) NotifyNodeStatus(ctx context.Context, cb func(*corev1.Node)) {
     // This method is called by Virtual Kubelet to get node status updates
     // For HPC providers, we can implement a simple periodic update

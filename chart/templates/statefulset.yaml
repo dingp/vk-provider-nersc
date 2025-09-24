@@ -1,0 +1,43 @@
+{{- if .Values.statefulset.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.statefulset.name }}
+  labels:
+    app: {{ .Values.statefulset.name }}
+spec:
+  serviceName: "{{ .Values.statefulset.name }}"
+  replicas: {{ .Values.statefulset.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.statefulset.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.statefulset.name }}
+      annotations:
+        nersc.sf/project: "{{ .Values.statefulset.project }}"
+        nersc.sf/inputSource: "{{ .Values.statefulset.inputSource }}"
+        nersc.sf/outputDest: "{{ .Values.statefulset.outputDest }}"
+        nersc.sf/stageOut: "{{ .Values.statefulset.stageOut }}"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: {{ .Values.statefulset.nodeSelector }}
+      containers:
+      - name: {{ .Values.statefulset.container.name }}
+        image: {{ .Values.statefulset.container.image }}
+        command: {{ toYaml .Values.statefulset.container.command | nindent 8 }}
+        args: {{ toYaml .Values.statefulset.container.args | nindent 8 }}
+        volumeMounts:
+{{- range .Values.statefulset.volumeMounts }}
+        - name: {{ .name }}
+          mountPath: {{ .mountPath }}
+          readOnly: {{ .readOnly }}
+{{- end }}
+      volumes:
+{{- range .Values.statefulset.volumes }}
+      - name: {{ .name }}
+        persistentVolumeClaim:
+          claimName: {{ .claimName }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hpc-stateful
+spec:
+  serviceName: "hpc-stateful"
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hpc-stateful
+  template:
+    metadata:
+      labels:
+        app: hpc-stateful
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: perlmutter-vk
+      containers:
+      - name: compute
+        image: registry.example.com/compute:latest
+        command: ["python"]
+        args: ["compute.py"]
+        volumeMounts:
+        - name: data
+          mountPath: /mnt/data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: hpc-data-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hpc-data-pvc
+  annotations:
+    nersc.sf/inputSource: "globus://endpoint-id/path/to/data"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Gi

@@ -1,0 +1,80 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: vk-provider-nersc
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  HELM_CHART_PATH: ./chart
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Install dependencies
+      run: go mod tidy
+
+    - name: Build binary
+      run: make build
+
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: vk-provider-nersc-binary
+        path: bin/vk-nersc
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      run: |
+        docker build -t $REGISTRY/$IMAGE_NAME:latest .
+        docker push $REGISTRY/$IMAGE_NAME:latest
+
+  helm:
+    runs-on: ubuntu-latest
+    needs: docker
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v3
+
+    - name: Package Helm chart
+      run: helm package $HELM_CHART_PATH --destination ./helm-packages
+
+    - name: Upload Helm chart artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: vk-nersc-helm-chart
+        path: helm-packages/*.tgz
+
+    # Optional: publish to Helm repo (e.g., GitHub Pages)
+    - name: Deploy Helm chart to GitHub Pages
+      if: github.ref == 'refs/heads/main'
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./helm-packages

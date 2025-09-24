@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vk-nersc
+  labels:
+    app: vk-nersc
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: vk-nersc
+  template:
+    metadata:
+      labels:
+        app: vk-nersc
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+      - name: vk-nersc
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        - name: SF_API_ENDPOINT
+          value: "{{ .Values.sfApiEndpoint }}"
+        - name: SF_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sf-api-token
+              key: token
+        - name: VK_NODE_NAME
+          value: "{{ .Values.vkNodeName }}"
+{{- if .Values.extraEnv }}
+{{- range .Values.extraEnv }}
+        - name: {{ .name }}
+          value: "{{ .value }}"
+{{- end }}
+{{- end }}

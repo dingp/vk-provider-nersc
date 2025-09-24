@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hpc-input-pvc
+  annotations:
+    nersc.sf/inputSource: "globus://endpoint-id/path/to/input"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hpc-output-pvc
+  annotations:
+    nersc.sf/outputDest: "globus://endpoint-id/path/to/output"
+    nersc.sf/stageOut: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-test-pod
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: perlmutter-vk
+  volumes:
+  - name: input
+    persistentVolumeClaim:
+      claimName: hpc-input-pvc
+  - name: output
+    persistentVolumeClaim:
+      claimName: hpc-output-pvc
+  containers:
+  - name: analysis
+    image: registry.example.com/analysis:latest
+    command: ["python"]
+    args: ["/mnt/input/analyze.py", "--output", "/mnt/output/results.txt"]
+    volumeMounts:
+    - name: input
+      mountPath: /mnt/input
+      readOnly: true
+    - name: output
+      mountPath: /mnt/output
+      readOnly: false

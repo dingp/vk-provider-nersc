@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vk-nersc
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vk-nersc-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vk-nersc-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vk-nersc-role
+subjects:
+- kind: ServiceAccount
+  name: vk-nersc
+  namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vk-nersc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vk-nersc
+  template:
+    metadata:
+      labels:
+        app: vk-nersc
+    spec:
+      serviceAccountName: vk-nersc
+      containers:
+      - name: vk-nersc
+        image: registry.example.com/vk-provider-nersc:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SF_API_ENDPOINT
+          value: "https://api.nersc.gov/api/v1.2"
+        - name: SF_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sf-api-token
+              key: token
+        - name: VK_NODE_NAME
+          value: "perlmutter-vk"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sf-api-token
+type: Opaque
+stringData:
+  token: "<YOUR_SUPERFACILITY_API_TOKEN>"

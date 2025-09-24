@@ -1,0 +1,60 @@
+# Development configuration for Virtual Kubelet NERSC provider
+
+replicaCount: 1  # Single VK node for dev/testing
+
+image:
+  repository: registry.example.com/vk-provider-nersc
+  tag: dev
+  pullPolicy: Always  # Always pull latest dev image
+
+sfApiEndpoint: "https://api.nersc.gov/api/v1.2"
+sfApiToken: "" # Will be stored in secret
+
+vkNodeName: "perlmutter-vk-dev"
+
+serviceAccount:
+  name: vk-nersc-dev
+
+rbac:
+  create: true
+
+resources:
+  requests:
+    cpu: "200m"
+    memory: "256Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+nodeSelector:
+  kubernetes.io/os: linux
+
+extraEnv:
+- name: VK_LOG_LEVEL
+  value: "debug"
+
+tolerations: []
+affinity: {}
+
+# StatefulSet in dev mode (optional)
+statefulset:
+  enabled: false
+  name: hpc-stateful-dev
+  replicas: 1
+  project: m9999
+  inputSource: ""
+  outputDest: ""
+  stageOut: "false"
+  nodeSelector: perlmutter-vk-dev
+  container:
+    name: compute
+    image: registry.example.com/compute:dev
+    command: ["python"]
+    args: ["compute.py"]
+  volumeMounts:
+    - name: data
+      mountPath: /mnt/data
+      readOnly: false
+  volumes:
+    - name: data
+      claimName: hpc-data-pvc-dev

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simple-test
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: perlmutter-vk
+  containers:
+  - name: hello
+    image: registry.example.com/hello:latest
+    command: ["echo"]
+    args: ["Hello from Perlmutter via Virtual Kubelet!"]
+    resources:
+      requests:
+        cpu: "1"
+        memory: "1Gi"

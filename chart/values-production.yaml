@@ -1,0 +1,49 @@
+# Production configuration for Virtual Kubelet NERSC provider
+
+replicaCount: 3  # Run multiple VK nodes for HA
+
+image:
+  repository: registry.example.com/vk-provider-nersc
+  tag: stable
+  pullPolicy: IfNotPresent
+
+sfApiEndpoint: "https://api.nersc.gov/api/v1.2"
+sfApiToken: "" # Will be stored in secret
+
+vkNodeName: "perlmutter-vk"
+
+serviceAccount:
+  name: vk-nersc
+
+rbac:
+  create: true
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+
+nodeSelector:
+  kubernetes.io/os: linux
+
+tolerations:
+- key: "virtual-kubelet.io/provider"
+  operator: "Equal"
+  value: "nersc"
+  effect: "NoSchedule"
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - vk-nersc
+      topologyKey: "kubernetes.io/hostname"
+
+extraEnv: []

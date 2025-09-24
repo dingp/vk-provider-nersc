@@ -60,11 +60,6 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
         script = scripts.PodToSlurmPodmanWithVolumes(pod, volumeScratchPaths)
     }
 
-    jobName := pod.Name
-    if ssName != "" {
-        jobName = fmt.Sprintf("%s-%d", ssName, ordinal)
-    }
-
     jobID, err := p.sfClient.SubmitJob(superfacility.JobSubmissionRequest{
         Script:  script,
         System:  "perlmutter",
@@ -177,7 +172,7 @@ func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, contain
     return io.NopCloser(strings.NewReader(logs)), nil
 }
 
-func (p *NerscProvider) RunInContainer(ctx context.Context, namespace, name, container string, cmd []string, attach io.AttachOptions) error {
+func (p *NerscProvider) RunInContainer(ctx context.Context, namespace, name, container string, cmd []string, attach interface{}) error {
     return fmt.Errorf("exec not supported for HPC jobs")
 }
 

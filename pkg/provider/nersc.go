@@ -3,6 +3,7 @@ package provider
 import (
     "context"
     "fmt"
+    "io"
     "log"
     "os"
     "strconv"
@@ -33,6 +34,10 @@ func NewNerscProvider(endpoint, token, nodeName string) (*NerscProvider, error) 
 
 func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
     user := os.Getenv("USER")
+    if user == "" {
+        user = "default"
+    }
+    
     ssName, ordinal := detectStatefulSet(pod)
 
     var jobScratchBase string
@@ -76,6 +81,148 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
     return nil
 }
 
+func (p *NerscProvider) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
+    // Pods are immutable in HPC context, so this is a no-op
+    return nil
+}
+
+func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
+    key := podKey(pod)
+    if jobID, exists := p.podMap[key]; exists {
+        err := p.sfClient.CancelJob(jobID)
+        delete(p.podMap, key)
+        if err != nil {
+            log.Printf("Failed to cancel job %s for pod %s: %v", jobID, key, err)
+            return err
+        }
+        log.Printf("Cancelled job %s for pod %s", jobID, key)
+    }
+    return nil
+}
+
+func (p *NerscProvider) GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+    key := fmt.Sprintf("%s/%s", namespace, name)
+    jobID, exists := p.podMap[key]
+    if !exists {
+        return nil, fmt.Errorf("pod %s not found", key)
+    }
+
+    status, err := p.sfClient.GetJobStatus(jobID)
+    if err != nil {
+        return nil, err
+    }
+
+    pod := &corev1.Pod{
+        ObjectMeta: metav1.ObjectMeta{
+            Name:      name,
+            Namespace: namespace,
+        },
+        Status: corev1.PodStatus{
+            Phase: mapJobStatusToPodPhase(status),
+        },
+    }
+
+    return pod, nil
+}
+
+func (p *NerscProvider) GetPodStatus(ctx context.Context, namespace, name string) (*corev1.PodStatus, error) {
+    pod, err := p.GetPod(ctx, namespace, name)
+    if err != nil {
+        return nil, err
+    }
+    return &pod.Status, nil
+}
+
+func (p *NerscProvider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
+    var pods []*corev1.Pod
+    for key, jobID := range p.podMap {
+        parts := strings.Split(key, "/")
+        if len(parts) != 2 {
+            continue
+        }
+        namespace, name := parts[0], parts[1]
+        
+        status, err := p.sfClient.GetJobStatus(jobID)
+        if err != nil {
+            log.Printf("Failed to get status for job %s: %v", jobID, err)
+            continue
+        }
+
+        pod := &corev1.Pod{
+            ObjectMeta: metav1.ObjectMeta{
+                Name:      name,
+                Namespace: namespace,
+            },
+            Status: corev1.PodStatus{
+                Phase: mapJobStatusToPodPhase(status),
+            },
+        }
+        pods = append(pods, pod)
+    }
+    return pods, nil
+}
+
+func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, container string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
+    key := fmt.Sprintf("%s/%s", namespace, name)
+    jobID, exists := p.podMap[key]
+    if !exists {
+        return nil, fmt.Errorf("pod %s not found", key)
+    }
+
+    logs, err := p.sfClient.FetchJobLogs(jobID)
+    if err != nil {
+        return nil, err
+    }
+
+    return io.NopCloser(strings.NewReader(logs)), nil
+}
+
+func (p *NerscProvider) RunInContainer(ctx context.Context, namespace, name, container string, cmd []string, attach io.AttachOptions) error {
+    return fmt.Errorf("exec not supported for HPC jobs")
+}
+
+func (p *NerscProvider) GetContainerLogs(ctx context.Context, namespace, name, container string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
+    return p.GetPodLogs(ctx, namespace, name, container, opts)
+}
+
+func (p *NerscProvider) NodeConditions(ctx context.Context) []corev1.NodeCondition {
+    return []corev1.NodeCondition{
+        {
+            Type:   corev1.NodeReady,
+            Status: corev1.ConditionTrue,
+            LastHeartbeatTime: metav1.NewTime(time.Now()),
+            LastTransitionTime: metav1.NewTime(time.Now()),
+            Reason: "KubeletReady",
+            Message: "NERSC provider is ready",
+        },
+    }
+}
+
+func (p *NerscProvider) NodeAddresses(ctx context.Context) []corev1.NodeAddress {
+    return []corev1.NodeAddress{
+        {
+            Type:    corev1.NodeInternalIP,
+            Address: "127.0.0.1",
+        },
+        {
+            Type:    corev1.NodeHostName,
+            Address: p.nodeName,
+        },
+    }
+}
+
+func (p *NerscProvider) NodeDaemonEndpoints(ctx context.Context) *corev1.NodeDaemonEndpoints {
+    return &corev1.NodeDaemonEndpoints{
+        KubeletEndpoint: corev1.DaemonEndpoint{
+            Port: 10250,
+        },
+    }
+}
+
+func (p *NerscProvider) OperatingSystem() string {
+    return "Linux"
+}
+
 func detectStatefulSet(pod *corev1.Pod) (string, int) {
     for _, owner := range pod.OwnerReferences {
         if owner.Kind == "StatefulSet" {
@@ -98,4 +245,21 @@ func getProjectFromAnnotations(pod *corev1.Pod) string {
     return ""
 }
 
-// Other VK provider methods unchanged...
+func podKey(pod *corev1.Pod) string {
+    return fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+}
+
+func mapJobStatusToPodPhase(status string) corev1.PodPhase {
+    switch strings.ToLower(status) {
+    case "pending", "queued":
+        return corev1.PodPending
+    case "running":
+        return corev1.PodRunning
+    case "completed", "success":
+        return corev1.PodSucceeded
+    case "failed", "error", "cancelled":
+        return corev1.PodFailed
+    default:
+        return corev1.PodPending
+    }
+}

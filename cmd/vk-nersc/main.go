@@ -6,6 +6,7 @@ import (
     "os"
 
     "github.com/virtual-kubelet/virtual-kubelet/node"
+    "github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
     "vk-provider-nersc/pkg/provider"
 )
 
@@ -22,13 +23,18 @@ func main() {
         log.Fatalf("Failed to create provider: %v", err)
     }
 
-    vkNode, err := node.NewNode(prov, node.WithNodeName(nodeName))
-    if err != nil {
-        log.Fatalf("Failed to create VK node: %v", err)
+    ctx := context.Background()
+    
+    // Create node configuration
+    cfg := nodeutil.ProviderConfig{
+        NodeName: nodeName,
     }
 
+    // Create and run the virtual kubelet node
+    vkNode := node.NewNodeController(prov, cfg)
+    
     log.Printf("Starting Virtual Kubelet node %s for Perlmutter...", nodeName)
-    if err := vkNode.Run(context.Background()); err != nil {
+    if err := vkNode.Run(ctx); err != nil {
         log.Fatalf("VK exited: %v", err)
     }
 }

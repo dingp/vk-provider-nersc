@@ -3,6 +3,7 @@ BINARY_NAME=vk-nersc
 all: build
 
 build:
+	go mod tidy
 	go build -o bin/$(BINARY_NAME) ./cmd/vk-nersc
 
 run:

@@ -218,6 +218,49 @@ func (p *NerscProvider) OperatingSystem() string {
     return "Linux"
 }
 
+func (p *NerscProvider) NotifyNodeStatus(ctx context.Context, cb func(*corev1.Node)) {
+    // This method is called by Virtual Kubelet to get node status updates
+    // For HPC providers, we can implement a simple periodic update
+    go func() {
+        ticker := time.NewTicker(30 * time.Second)
+        defer ticker.Stop()
+        
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                node := &corev1.Node{
+                    ObjectMeta: metav1.ObjectMeta{
+                        Name: p.nodeName,
+                    },
+                    Status: corev1.NodeStatus{
+                        Conditions: p.NodeConditions(ctx),
+                        Addresses:  p.NodeAddresses(ctx),
+                        DaemonEndpoints: *p.NodeDaemonEndpoints(ctx),
+                        NodeInfo: corev1.NodeSystemInfo{
+                            OperatingSystem: p.OperatingSystem(),
+                            Architecture:    "amd64",
+                            KubeletVersion:  "v1.29.0-vk",
+                        },
+                        Capacity: corev1.ResourceList{
+                            corev1.ResourceCPU:    *resource.NewQuantity(1000, resource.DecimalSI),
+                            corev1.ResourceMemory: *resource.NewQuantity(1000*1024*1024*1024, resource.BinarySI),
+                            corev1.ResourcePods:   *resource.NewQuantity(1000, resource.DecimalSI),
+                        },
+                        Allocatable: corev1.ResourceList{
+                            corev1.ResourceCPU:    *resource.NewQuantity(1000, resource.DecimalSI),
+                            corev1.ResourceMemory: *resource.NewQuantity(1000*1024*1024*1024, resource.BinarySI),
+                            corev1.ResourcePods:   *resource.NewQuantity(1000, resource.DecimalSI),
+                        },
+                    },
+                }
+                cb(node)
+            }
+        }
+    }()
+}
+
 func detectStatefulSet(pod *corev1.Pod) (string, int) {
     for _, owner := range pod.OwnerReferences {
         if owner.Kind == "StatefulSet" {

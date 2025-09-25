@@ -1,0 +1,26 @@
+# Helmfile for managing Virtual Kubelet NERSC provider deployments
+
+repositories:
+  - name: local
+    url: file://./chart
+
+releases:
+  # Development VK provider
+  - name: vk-nersc-dev
+    namespace: vk-nersc-dev
+    chart: ./chart
+    values:
+      - chart/values-dev.yaml
+    secrets:
+      - sfApiToken: "{{ requiredEnv 'SF_API_TOKEN_DEV' }}"
+    installed: true
+
+  # Production VK provider
+  - name: vk-nersc-prod
+    namespace: vk-nersc-prod
+    chart: ./chart
+    values:
+      - chart/values-production.yaml
+    secrets:
+      - sfApiToken: "{{ requiredEnv 'SF_API_TOKEN_PROD' }}"
+    installed: true

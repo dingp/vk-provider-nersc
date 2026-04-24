@@ -15,6 +15,15 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: mpi-test
+  annotations:
+    nersc.sf/project: "m1234"
+    nersc.slurm/nodes: "4"
+    nersc.slurm/tasks-per-node: "8"
+    nersc.slurm/cpus-per-task: "16"
+    nersc.slurm/gpus-per-node: "4"
+    nersc.slurm/mem: "128GB"
+    nersc.slurm/time: "02:00:00"
+    nersc.slurm/partition: "regular"
 spec:
   nodeSelector:
     kubernetes.io/hostname: perlmutter-vk
@@ -32,4 +41,5 @@ spec:
 ## Notes
 - Ensure your container image has MPI libraries compatible with Perlmutter.
 - Use Slurm's `srun` for optimal performance.
-- VK's Slurm script generator can be extended to detect MPI commands and wrap them in `srun`.
+- Slurm topology and walltime are controlled by `nersc.slurm/*` pod annotations.
+- Kubernetes resource requests do not replace Slurm annotations for multi-node MPI layout.

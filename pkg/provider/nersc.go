@@ -167,9 +167,12 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 
 	var script string
 	if len(pod.Spec.Containers) > 1 {
-		script = scripts.PodToSlurmPodmanMultiWithVolumes(pod, volumeScratchPaths)
+		script, err = scripts.PodToSlurmPodmanMultiWithVolumes(pod, volumeScratchPaths)
 	} else {
-		script = scripts.PodToSlurmPodmanWithVolumes(pod, volumeScratchPaths)
+		script, err = scripts.PodToSlurmPodmanWithVolumes(pod, volumeScratchPaths)
+	}
+	if err != nil {
+		return fmt.Errorf("generate slurm script for pod %s: %w", key, err)
 	}
 
 	jobID, err := p.sfClient.SubmitJob(ctx, superfacility.JobSubmissionRequest{

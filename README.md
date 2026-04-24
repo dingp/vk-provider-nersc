@@ -16,16 +16,17 @@ It allows Kubernetes workloads (Pods, Jobs, StatefulSets) to be scheduled onto P
 
 ## Features
 
-✅ Submit K8s Pods as Slurm jobs via Superfacility API  
-✅ Run containers with Podman-HPC on Perlmutter  
-✅ Monitor job status and map to Pod phases  
-✅ Retrieve logs from HPC jobs  
-✅ Optional Globus stage-in/out via Superfacility API annotations
-✅ PVC integration for volume mounts  
-✅ StatefulSet-aware scratch paths and per-replica staging  
-✅ Helm chart for easy deployment (dev & prod)  
-✅ CI/CD pipeline via GitHub Actions  
-✅ Helmfile for multi-env deployment
+- Submit K8s Pods as Slurm jobs via Superfacility API
+- Run containers with Podman-HPC on Perlmutter
+- Monitor job status and map to Pod phases
+- Retrieve logs from HPC jobs
+- Optional Globus stage-in/out via Superfacility API annotations
+- Slurm resource annotations for multi-node jobs
+- PVC integration for volume mounts
+- StatefulSet-aware scratch paths and per-replica staging
+- Helm chart for easy deployment (dev & prod)
+- CI/CD pipeline via GitHub Actions
+- Helmfile for multi-env deployment
 
 ---
 
@@ -92,6 +93,54 @@ export SF_API_TOKEN_DEV=<dev_token>
 export SF_API_TOKEN_PROD=<prod_token>
 helmfile apply
 ```
+
+---
+
+## Slurm Resource Annotations
+
+By default, each pod is submitted as a conservative single-node Slurm job:
+
+```bash
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=4GB
+#SBATCH --time=00:30:00
+#SBATCH --partition=regular
+```
+
+Set Slurm-specific resource needs on the pod annotations. Kubernetes CPU/memory requests are useful for Kubernetes scheduling metadata, but they do not express Slurm topology such as node count, tasks per node, GPU layout, or walltime.
+
+```yaml
+metadata:
+  annotations:
+    nersc.sf/project: "m1234"
+    nersc.slurm/nodes: "4"
+    nersc.slurm/tasks-per-node: "8"
+    nersc.slurm/cpus-per-task: "16"
+    nersc.slurm/gpus-per-node: "4"
+    nersc.slurm/mem: "128GB"
+    nersc.slurm/time: "02:00:00"
+    nersc.slurm/partition: "regular"
+```
+
+Supported Slurm annotations:
+
+| Annotation | Description |
+| --- | --- |
+| `nersc.slurm/nodes` | `#SBATCH --nodes`; defaults to `1`. |
+| `nersc.slurm/ntasks` | `#SBATCH --ntasks`; omitted by default. |
+| `nersc.slurm/tasks-per-node` | `#SBATCH --ntasks-per-node`; omitted by default. |
+| `nersc.slurm/cpus-per-task` | `#SBATCH --cpus-per-task`; defaults to `1`. |
+| `nersc.slurm/gpus` | `#SBATCH --gpus`; mutually exclusive with `gpus-per-node`. |
+| `nersc.slurm/gpus-per-node` | `#SBATCH --gpus-per-node`; mutually exclusive with `gpus`. |
+| `nersc.slurm/mem` | `#SBATCH --mem`; defaults to `4GB`. |
+| `nersc.slurm/time` | `#SBATCH --time`; defaults to `00:30:00`. |
+| `nersc.slurm/partition` | `#SBATCH --partition`; defaults to `regular`. |
+| `nersc.slurm/qos` | `#SBATCH --qos`; omitted by default. |
+| `nersc.slurm/constraint` | `#SBATCH --constraint`; omitted by default. |
+| `nersc.slurm/account` | `#SBATCH --account`; omitted by default. `nersc.sf/project` is still sent to the Superfacility API request. |
+
+Invalid annotation values fail pod submission before the Slurm job is created.
 
 ---
 

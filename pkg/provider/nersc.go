@@ -22,10 +22,13 @@ import (
 )
 
 type NerscProvider struct {
-	sfClient jobClient
-	nodeName string
-	mu       sync.RWMutex
-	podMap   map[string]string // podKey -> jobID
+	sfClient             jobClient
+	nodeName             string
+	transferPollInterval time.Duration
+	transferTimeout      time.Duration
+	mu                   sync.RWMutex
+	podMap               map[string]string // podKey -> jobID
+	stagingMap           map[string]*podStagingState
 }
 
 type jobClient interface {
@@ -33,6 +36,48 @@ type jobClient interface {
 	GetJobStatus(context.Context, string) (string, error)
 	CancelJob(context.Context, string) error
 	FetchJobLogs(context.Context, string) (string, error)
+	StartGlobusTransfer(context.Context, superfacility.GlobusTransferRequest) (superfacility.GlobusTransfer, error)
+	CheckGlobusTransfer(context.Context, string) (superfacility.GlobusTransferResult, error)
+}
+
+const (
+	defaultTransferPollInterval = 15 * time.Second
+	defaultTransferTimeout      = 30 * time.Minute
+
+	annotationInputSource    = "nersc.sf/inputSource"
+	annotationOutputDest     = "nersc.sf/outputDest"
+	annotationStageOut       = "nersc.sf/stageOut"
+	annotationStageVolume    = "nersc.sf/stageVolume"
+	annotationInputVolume    = "nersc.sf/inputVolume"
+	annotationOutputVolume   = "nersc.sf/outputVolume"
+	annotationGlobusUsername = "nersc.sf/globusUsername"
+)
+
+type podStagingState struct {
+	inputTransferID  string
+	inputSource      *globusLocation
+	inputTargetDir   string
+	outputTransferID string
+	outputStatus     transferStatus
+	outputError      string
+	outputRequest    *superfacility.GlobusTransferRequest
+	outputDest       *globusLocation
+	outputSourceDir  string
+}
+
+type transferStatus string
+
+const (
+	transferNotStarted transferStatus = ""
+	transferStarting   transferStatus = "starting"
+	transferRunning    transferStatus = "running"
+	transferSucceeded  transferStatus = "succeeded"
+	transferFailed     transferStatus = "failed"
+)
+
+type globusLocation struct {
+	Endpoint string
+	Path     string
 }
 
 func NewNerscProvider(endpoint, token, nodeName string) (*NerscProvider, error) {
@@ -58,9 +103,12 @@ func NewNerscProvider(endpoint, token, nodeName string) (*NerscProvider, error) 
 
 	client := superfacility.New(endpoint, token)
 	return &NerscProvider{
-		sfClient: client,
-		nodeName: nodeName,
-		podMap:   make(map[string]string),
+		sfClient:             client,
+		nodeName:             nodeName,
+		transferPollInterval: defaultTransferPollInterval,
+		transferTimeout:      defaultTransferTimeout,
+		podMap:               make(map[string]string),
+		stagingMap:           make(map[string]*podStagingState),
 	}, nil
 }
 
@@ -98,6 +146,25 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 		volumeScratchPaths[vol.Name] = scratchPath
 	}
 
+	staging, err := buildStagingState(pod, jobScratchBase, volumeScratchPaths)
+	if err != nil {
+		return err
+	}
+	if staging != nil && staging.inputSource != nil {
+		transferID, err := p.startAndWaitForTransfer(ctx, superfacility.GlobusTransferRequest{
+			SourceUUID: staging.inputSource.Endpoint,
+			TargetUUID: "perlmutter",
+			SourceDir:  staging.inputSource.Path,
+			TargetDir:  staging.inputTargetDir,
+			Username:   getAnnotation(pod, annotationGlobusUsername),
+		})
+		if err != nil {
+			return fmt.Errorf("stage input for pod %s: %w", key, err)
+		}
+		staging.inputTransferID = transferID
+		log.Printf("Pod %s input staged with Globus transfer %s", key, transferID)
+	}
+
 	var script string
 	if len(pod.Spec.Containers) > 1 {
 		script = scripts.PodToSlurmPodmanMultiWithVolumes(pod, volumeScratchPaths)
@@ -125,6 +192,12 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 		return nil
 	}
 	p.podMap[key] = jobID
+	if p.stagingMap == nil {
+		p.stagingMap = make(map[string]*podStagingState)
+	}
+	if staging != nil {
+		p.stagingMap[key] = staging
+	}
 	p.mu.Unlock()
 
 	log.Printf("Pod %s submitted as job %s (StatefulSet: %s, Ordinal: %d)", key, jobID, ssName, ordinal)
@@ -152,10 +225,15 @@ func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 		p.mu.Lock()
 		if p.podMap[key] == jobID {
 			delete(p.podMap, key)
+			delete(p.stagingMap, key)
 		}
 		p.mu.Unlock()
 
 		log.Printf("Cancelled job %s for pod %s", jobID, key)
+	} else {
+		p.mu.Lock()
+		delete(p.stagingMap, key)
+		p.mu.Unlock()
 	}
 	return nil
 }
@@ -178,6 +256,12 @@ func (p *NerscProvider) podJobsSnapshot() map[string]string {
 	return snapshot
 }
 
+func (p *NerscProvider) stagingForPodKey(key string) *podStagingState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.stagingMap[key]
+}
+
 func (p *NerscProvider) GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
 	key := fmt.Sprintf("%s/%s", namespace, name)
 	jobID, exists := p.jobIDForPodKey(key)
@@ -190,14 +274,14 @@ func (p *NerscProvider) GetPod(ctx context.Context, namespace, name string) (*co
 		return nil, err
 	}
 
+	podStatus := p.podStatusForJob(ctx, key, mapJobStatusToPodPhase(status))
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Status: corev1.PodStatus{
-			Phase: mapJobStatusToPodPhase(status),
-		},
+		Status: podStatus,
 	}
 
 	return pod, nil
@@ -239,13 +323,25 @@ func (p *NerscProvider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 				Name:      name,
 				Namespace: namespace,
 			},
-			Status: corev1.PodStatus{
-				Phase: mapJobStatusToPodPhase(status),
-			},
+			Status: p.podStatusForJob(ctx, key, mapJobStatusToPodPhase(status)),
 		}
 		pods = append(pods, pod)
 	}
 	return pods, nil
+}
+
+func (p *NerscProvider) podStatusForJob(ctx context.Context, key string, jobPhase corev1.PodPhase) corev1.PodStatus {
+	status := corev1.PodStatus{Phase: jobPhase}
+	if jobPhase != corev1.PodSucceeded {
+		return status
+	}
+
+	staging := p.stagingForPodKey(key)
+	if staging == nil || staging.outputRequest == nil {
+		return status
+	}
+
+	return p.reconcileStageOut(ctx, key)
 }
 
 func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, container string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {

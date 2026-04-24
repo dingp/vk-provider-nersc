@@ -39,6 +39,87 @@ type JobSubmissionResponse struct {
 	JobID string `json:"jobid"`
 }
 
+type GlobusTransferRequest struct {
+	SourceUUID string
+	TargetUUID string
+	SourceDir  string
+	TargetDir  string
+	Username   string
+}
+
+type GlobusTransfer struct {
+	GlobusUUID string `json:"globus_uuid"`
+	TaskID     string `json:"task_id"`
+	UUID       string `json:"uuid"`
+	ID         string `json:"id"`
+	Message    string `json:"message"`
+}
+
+func (t GlobusTransfer) TransferID() string {
+	for _, id := range []string{t.GlobusUUID, t.TaskID, t.UUID, t.ID} {
+		if id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+type GlobusTransferResult struct {
+	GlobusUUID       string `json:"globus_uuid"`
+	TaskID           string `json:"task_id"`
+	UUID             string `json:"uuid"`
+	ID               string `json:"id"`
+	Status           string `json:"status"`
+	State            string `json:"state"`
+	CompletionStatus string `json:"completion_status"`
+	Message          string `json:"message"`
+	Error            string `json:"error"`
+	Successful       *bool  `json:"successful"`
+	Done             *bool  `json:"done"`
+}
+
+func (r GlobusTransferResult) TransferID() string {
+	for _, id := range []string{r.GlobusUUID, r.TaskID, r.UUID, r.ID} {
+		if id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func (r GlobusTransferResult) Summary() string {
+	for _, value := range []string{r.Message, r.Error, r.Status, r.State, r.CompletionStatus} {
+		if value != "" {
+			return value
+		}
+	}
+	return "unknown transfer status"
+}
+
+func (r GlobusTransferResult) IsComplete() (bool, bool) {
+	if r.Successful != nil {
+		return *r.Successful, !*r.Successful
+	}
+	if r.Done != nil && !*r.Done {
+		return false, false
+	}
+
+	status := strings.ToLower(strings.TrimSpace(firstNonEmpty(r.Status, r.State, r.CompletionStatus)))
+	if r.Done != nil && *r.Done && status == "" {
+		return true, false
+	}
+	switch status {
+	case "succeeded", "success", "successful", "done", "completed", "complete":
+		return true, false
+	case "failed", "failure", "error", "cancelled", "canceled":
+		return true, true
+	case "", "active", "inactive", "pending", "queued", "running", "submitted":
+		return false, false
+	default:
+		return false, false
+	}
+}
+
 func (c *Client) SubmitJob(ctx context.Context, req JobSubmissionRequest) (string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -136,6 +217,82 @@ func (c *Client) FetchJobLogs(ctx context.Context, jobID string) (string, error)
 	return string(data), nil
 }
 
+func (c *Client) StartGlobusTransfer(ctx context.Context, req GlobusTransferRequest) (GlobusTransfer, error) {
+	if req.SourceUUID == "" {
+		return GlobusTransfer{}, fmt.Errorf("source_uuid is required")
+	}
+	if req.TargetUUID == "" {
+		return GlobusTransfer{}, fmt.Errorf("target_uuid is required")
+	}
+	if req.SourceDir == "" {
+		return GlobusTransfer{}, fmt.Errorf("source_dir is required")
+	}
+	if req.TargetDir == "" {
+		return GlobusTransfer{}, fmt.Errorf("target_dir is required")
+	}
+
+	form := url.Values{}
+	form.Set("source_uuid", req.SourceUUID)
+	form.Set("target_uuid", req.TargetUUID)
+	form.Set("source_dir", req.SourceDir)
+	form.Set("target_dir", req.TargetDir)
+	if req.Username != "" {
+		form.Set("username", req.Username)
+	}
+
+	httpReq, err := c.newRequest(ctx, http.MethodPost, "storage/globus/transfer", strings.NewReader(form.Encode()))
+	if err != nil {
+		return GlobusTransfer{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return GlobusTransfer{}, fmt.Errorf("start globus transfer request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return GlobusTransfer{}, fmt.Errorf("start globus transfer failed: %s", responseError(resp))
+	}
+
+	var out GlobusTransfer
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return GlobusTransfer{}, fmt.Errorf("decode globus transfer response: %w", err)
+	}
+	if out.TransferID() == "" {
+		return GlobusTransfer{}, fmt.Errorf("globus transfer response missing transfer id")
+	}
+	return out, nil
+}
+
+func (c *Client) CheckGlobusTransfer(ctx context.Context, globusUUID string) (GlobusTransferResult, error) {
+	if globusUUID == "" {
+		return GlobusTransferResult{}, fmt.Errorf("globus transfer id is required")
+	}
+
+	req, err := c.newRequest(ctx, http.MethodGet, fmt.Sprintf("storage/globus/transfer/%s", url.PathEscape(globusUUID)), nil)
+	if err != nil {
+		return GlobusTransferResult{}, err
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return GlobusTransferResult{}, fmt.Errorf("check globus transfer request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return GlobusTransferResult{}, fmt.Errorf("check globus transfer failed: %s", responseError(resp))
+	}
+
+	var out GlobusTransferResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return GlobusTransferResult{}, fmt.Errorf("decode globus transfer status response: %w", err)
+	}
+	return out, nil
+}
+
 func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -163,4 +320,13 @@ func responseError(resp *http.Response) string {
 		return resp.Status
 	}
 	return fmt.Sprintf("%s: %s", resp.Status, bodyText)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

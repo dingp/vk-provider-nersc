@@ -88,6 +88,71 @@ func TestSubmitJobRequiresJobID(t *testing.T) {
 	}
 }
 
+func TestStartGlobusTransferUsesFormEndpoint(t *testing.T) {
+	client := newTestClient(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v1.2/storage/globus/transfer" {
+			t.Fatalf("path = %s, want globus transfer path", r.URL.Path)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
+			t.Fatalf("content type = %q", got)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		expected := map[string]string{
+			"source_uuid": "dtn",
+			"target_uuid": "perlmutter",
+			"source_dir":  "/input",
+			"target_dir":  "/scratch/input",
+			"username":    "alice",
+		}
+		for key, want := range expected {
+			if got := r.PostForm.Get(key); got != want {
+				t.Fatalf("%s = %q, want %q", key, got, want)
+			}
+		}
+		return response(http.StatusOK, `{"globus_uuid":"transfer-123"}`), nil
+	})
+
+	transfer, err := client.StartGlobusTransfer(context.Background(), GlobusTransferRequest{
+		SourceUUID: "dtn",
+		TargetUUID: "perlmutter",
+		SourceDir:  "/input",
+		TargetDir:  "/scratch/input",
+		Username:   "alice",
+	})
+	if err != nil {
+		t.Fatalf("StartGlobusTransfer returned error: %v", err)
+	}
+	if transfer.TransferID() != "transfer-123" {
+		t.Fatalf("transfer id = %q, want transfer-123", transfer.TransferID())
+	}
+}
+
+func TestCheckGlobusTransferEscapesIDAndDecodesStatus(t *testing.T) {
+	client := newTestClient(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		if r.URL.EscapedPath() != "/api/v1.2/storage/globus/transfer/transfer%2F123" {
+			t.Fatalf("escaped path = %s", r.URL.EscapedPath())
+		}
+		return response(http.StatusOK, `{"globus_uuid":"transfer/123","status":"SUCCEEDED"}`), nil
+	})
+
+	result, err := client.CheckGlobusTransfer(context.Background(), "transfer/123")
+	if err != nil {
+		t.Fatalf("CheckGlobusTransfer returned error: %v", err)
+	}
+	done, failed := result.IsComplete()
+	if !done || failed {
+		t.Fatalf("completion = done %t failed %t, want done true failed false", done, failed)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

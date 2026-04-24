@@ -43,7 +43,9 @@ statefulset:
   replicas: 1
   project: m9999
   inputSource: ""
+  inputVolume: data
   outputDest: ""
+  outputVolume: data
   stageOut: "false"
   nodeSelector: perlmutter-vk-dev
   container:

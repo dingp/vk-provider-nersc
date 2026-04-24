@@ -15,14 +15,18 @@ import (
 )
 
 type fakeJobClient struct {
-	mu           sync.Mutex
-	submitJobID  string
-	submitReq    superfacility.JobSubmissionRequest
-	submitCount  int
-	statusByJob  map[string]string
-	cancelErr    error
-	cancelledIDs []string
-	logsByJob    map[string]string
+	mu              sync.Mutex
+	submitJobID     string
+	submitReq       superfacility.JobSubmissionRequest
+	submitCount     int
+	statusByJob     map[string]string
+	cancelErr       error
+	cancelledIDs    []string
+	logsByJob       map[string]string
+	operations      []string
+	transferID      string
+	transferReqs    []superfacility.GlobusTransferRequest
+	transferResults map[string][]superfacility.GlobusTransferResult
 }
 
 func (f *fakeJobClient) SubmitJob(ctx context.Context, req superfacility.JobSubmissionRequest) (string, error) {
@@ -30,6 +34,7 @@ func (f *fakeJobClient) SubmitJob(ctx context.Context, req superfacility.JobSubm
 	defer f.mu.Unlock()
 	f.submitCount++
 	f.submitReq = req
+	f.operations = append(f.operations, "submit")
 	return f.submitJobID, nil
 }
 
@@ -53,6 +58,33 @@ func (f *fakeJobClient) FetchJobLogs(ctx context.Context, jobID string) (string,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.logsByJob[jobID], nil
+}
+
+func (f *fakeJobClient) StartGlobusTransfer(ctx context.Context, req superfacility.GlobusTransferRequest) (superfacility.GlobusTransfer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.operations = append(f.operations, "start-transfer")
+	f.transferReqs = append(f.transferReqs, req)
+	transferID := f.transferID
+	if transferID == "" {
+		transferID = "transfer-1"
+	}
+	return superfacility.GlobusTransfer{GlobusUUID: transferID}, nil
+}
+
+func (f *fakeJobClient) CheckGlobusTransfer(ctx context.Context, transferID string) (superfacility.GlobusTransferResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.operations = append(f.operations, "check-transfer")
+	results := f.transferResults[transferID]
+	if len(results) == 0 {
+		return superfacility.GlobusTransferResult{GlobusUUID: transferID, Status: "SUCCEEDED"}, nil
+	}
+	result := results[0]
+	if len(results) > 1 {
+		f.transferResults[transferID] = results[1:]
+	}
+	return result, nil
 }
 
 func TestNewNerscProviderValidatesConfig(t *testing.T) {
@@ -177,6 +209,112 @@ func TestCreatePodRequiresContainer(t *testing.T) {
 	err := provider.CreatePod(context.Background(), pod)
 	if err == nil || !strings.Contains(err.Error(), "has no containers") {
 		t.Fatalf("error = %v, want no containers", err)
+	}
+}
+
+func TestCreatePodStagesInputBeforeSubmittingJob(t *testing.T) {
+	t.Setenv("USER", "alice")
+
+	client := &fakeJobClient{
+		submitJobID: "job-1",
+		transferID:  "input-transfer",
+		transferResults: map[string][]superfacility.GlobusTransferResult{
+			"input-transfer": {{GlobusUUID: "input-transfer", Status: "SUCCEEDED"}},
+		},
+	}
+	provider := &NerscProvider{
+		sfClient: client,
+		nodeName: "perlmutter-vk",
+		podMap:   make(map[string]string),
+	}
+	pod := testPod()
+	pod.Annotations[annotationInputSource] = "globus://dtn/global/cfs/cdirs/m1234/input"
+	pod.Annotations[annotationInputVolume] = "data"
+	pod.Spec.Volumes = []corev1.Volume{{Name: "data"}, {Name: "work"}}
+	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "data", MountPath: "/mnt/data"}}
+
+	if err := provider.CreatePod(context.Background(), pod); err != nil {
+		t.Fatalf("CreatePod returned error: %v", err)
+	}
+	if got, want := strings.Join(client.operations, ","), "start-transfer,check-transfer,submit"; got != want {
+		t.Fatalf("operations = %s, want %s", got, want)
+	}
+	if len(client.transferReqs) != 1 {
+		t.Fatalf("transfer request count = %d, want 1", len(client.transferReqs))
+	}
+	req := client.transferReqs[0]
+	if req.SourceUUID != "dtn" || req.TargetUUID != "perlmutter" {
+		t.Fatalf("endpoints = %s -> %s, want dtn -> perlmutter", req.SourceUUID, req.TargetUUID)
+	}
+	if req.SourceDir != "/global/cfs/cdirs/m1234/input" {
+		t.Fatalf("source dir = %q", req.SourceDir)
+	}
+	if req.TargetDir != "/global/cscratch1/sd/alice/demo/data" {
+		t.Fatalf("target dir = %q", req.TargetDir)
+	}
+}
+
+func TestGetPodStatusStagesOutputAfterJobSucceeds(t *testing.T) {
+	t.Setenv("USER", "alice")
+
+	client := &fakeJobClient{
+		submitJobID: "job-1",
+		statusByJob: map[string]string{"job-1": "completed"},
+		transferID:  "output-transfer",
+		transferResults: map[string][]superfacility.GlobusTransferResult{
+			"output-transfer": {{GlobusUUID: "output-transfer", Status: "SUCCEEDED"}},
+		},
+	}
+	provider := &NerscProvider{
+		sfClient: client,
+		nodeName: "perlmutter-vk",
+		podMap:   make(map[string]string),
+	}
+	pod := testPod()
+	pod.Annotations[annotationStageOut] = "true"
+	pod.Annotations[annotationOutputDest] = "globus://dtn/global/cfs/cdirs/m1234/output"
+	pod.Annotations[annotationOutputVolume] = "results"
+	pod.Spec.Volumes = []corev1.Volume{{Name: "data"}, {Name: "results"}}
+	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "results", MountPath: "/mnt/results"}}
+
+	if err := provider.CreatePod(context.Background(), pod); err != nil {
+		t.Fatalf("CreatePod returned error: %v", err)
+	}
+	status, err := provider.GetPodStatus(context.Background(), pod.Namespace, pod.Name)
+	if err != nil {
+		t.Fatalf("GetPodStatus returned error: %v", err)
+	}
+	if status.Phase != corev1.PodSucceeded || status.Reason != "StageOutComplete" {
+		t.Fatalf("status = %s/%s, want Succeeded/StageOutComplete", status.Phase, status.Reason)
+	}
+	if len(client.transferReqs) != 1 {
+		t.Fatalf("transfer request count = %d, want 1", len(client.transferReqs))
+	}
+	req := client.transferReqs[0]
+	if req.SourceUUID != "perlmutter" || req.TargetUUID != "dtn" {
+		t.Fatalf("endpoints = %s -> %s, want perlmutter -> dtn", req.SourceUUID, req.TargetUUID)
+	}
+	if req.SourceDir != "/global/cscratch1/sd/alice/demo/results" {
+		t.Fatalf("source dir = %q", req.SourceDir)
+	}
+	if req.TargetDir != "/global/cfs/cdirs/m1234/output" {
+		t.Fatalf("target dir = %q", req.TargetDir)
+	}
+}
+
+func TestCreatePodRequiresStageVolumeWhenStagingWithMultipleVolumes(t *testing.T) {
+	provider := &NerscProvider{
+		sfClient: &fakeJobClient{},
+		nodeName: "perlmutter-vk",
+		podMap:   make(map[string]string),
+	}
+	pod := testPod()
+	pod.Annotations[annotationInputSource] = "globus://dtn/global/cfs/cdirs/m1234/input"
+	pod.Spec.Volumes = []corev1.Volume{{Name: "data"}, {Name: "work"}}
+
+	err := provider.CreatePod(context.Background(), pod)
+	if err == nil || !strings.Contains(err.Error(), annotationStageVolume) {
+		t.Fatalf("error = %v, want stage volume requirement", err)
 	}
 }
 

@@ -6,7 +6,7 @@ This project implements a **Virtual Kubelet provider** that connects NERSC's **P
 - NERSC **Superfacility API**
 - **Podman-HPC** for container execution
 - Slurm job submission
-- Automatic **data staging** (input/output)
+- Optional Globus **data staging** via Superfacility API
 - **PVC integration**
 - **StatefulSet-aware** scratch paths and per-replica staging
 
@@ -20,7 +20,7 @@ It allows Kubernetes workloads (Pods, Jobs, StatefulSets) to be scheduled onto P
 ✅ Run containers with Podman-HPC on Perlmutter  
 ✅ Monitor job status and map to Pod phases  
 ✅ Retrieve logs from HPC jobs  
-✅ Automatic data staging (input/output) via Superfacility Transfer API  
+✅ Optional Globus stage-in/out via Superfacility API annotations
 ✅ PVC integration for volume mounts  
 ✅ StatefulSet-aware scratch paths and per-replica staging  
 ✅ Helm chart for easy deployment (dev & prod)  
@@ -139,9 +139,11 @@ spec:
 
 ---
 
-## PVC Integration & Data Staging
+## PVC Integration & Optional Data Staging
 
-You can annotate PVCs or pods to enable **automatic stage-in/out**:
+By default, workloads run directly against their Perlmutter scratch paths and no Globus transfer is started. This is the right mode when inputs already exist on scratch and outputs should remain there.
+
+Add pod annotations to opt into Globus stage-in/out:
 
 ```yaml
 metadata:
@@ -152,9 +154,28 @@ metadata:
 ```
 
 VK will:
-1. Stage input data to `/global/cscratch1/sd/<user>/<pod>/<volume>`
-2. Mount it in the container via `--volume`
-3. Stage output data back after job completion
+1. Stage input data from `nersc.sf/inputSource` to the selected scratch staging path before Slurm job submission
+2. Mount scratch paths in the container via `--volume`
+3. Start output staging to `nersc.sf/outputDest` after the Slurm job succeeds when `nersc.sf/stageOut` is `true`
+4. Keep the pod in `Running` with reason `StageOutRunning` until output transfer completes
+
+Globus URIs use the form `globus://<endpoint>/<absolute/path>`. The endpoint can be a Globus UUID or a NERSC shortcut supported by the Superfacility API, such as `dtn`, `hpss`, or `perlmutter`.
+
+The Superfacility API token must come from a client with the optional Globus capability enabled. If staging annotations are present but Globus is not enabled for the client, stage-in fails before compute submission or stage-out marks the pod failed with the transfer error.
+
+### Staging annotations
+
+| Annotation | Required | Description |
+| --- | --- | --- |
+| `nersc.sf/inputSource` | No | Globus source URI to stage into Perlmutter scratch before submitting the Slurm job. |
+| `nersc.sf/outputDest` | Required when `stageOut` is `true` | Globus destination URI for output staging after successful job completion. |
+| `nersc.sf/stageOut` | No | Set to `true` to enable output staging. |
+| `nersc.sf/inputVolume` | Required for input staging with multiple volumes | Volume name whose scratch path should receive staged input. |
+| `nersc.sf/outputVolume` | Required for output staging with multiple volumes | Volume name whose scratch path should supply staged output. |
+| `nersc.sf/stageVolume` | No | Shared fallback volume name for both input and output staging. If omitted with one volume, that volume is used. If omitted with no volumes, the pod scratch base is used. |
+| `nersc.sf/globusUsername` | No | Optional Superfacility API `username` value for Globus transfers when the token has permission to act for another user. |
+
+Current staging annotations are read from the pod template. PVCs are still supported as Kubernetes volumes, but PVC annotations are not read directly by this provider unless they are copied onto the pod.
 
 ---
 

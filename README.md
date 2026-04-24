@@ -166,6 +166,78 @@ Supported Slurm annotations:
 
 Invalid annotation values fail pod submission before the Slurm job is created.
 
+### Example: 2 GPU Nodes, 8 GPU Ranks
+
+Create the per-workload token Secret, then submit a Kubernetes `Job` that targets the virtual Perlmutter node. Replace the project, token, and image with values for your account and workload.
+
+```bash
+kubectl create secret generic sf-api-token \
+  --from-literal=token=<your_superfacility_api_token>
+```
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: perlmutter-gpu-ranks
+spec:
+  template:
+    metadata:
+      annotations:
+        nersc.sf/project: "m1234"
+        nersc.sf/tokenSecretName: "sf-api-token"
+        nersc.slurm/nodes: "2"
+        nersc.slurm/ntasks: "8"
+        nersc.slurm/tasks-per-node: "4"
+        nersc.slurm/cpus-per-task: "16"
+        nersc.slurm/gpus-per-node: "4"
+        nersc.slurm/gpus-per-task: "1"
+        nersc.slurm/launcher: "srun"
+        nersc.slurm/mem: "128GB"
+        nersc.slurm/time: "00:30:00"
+        nersc.slurm/partition: "gpu"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: perlmutter-vk
+      restartPolicy: Never
+      containers:
+      - name: ranks
+        image: registry.example.com/cuda-runtime:latest
+        command: ["bash", "-lc"]
+        args:
+        - |
+          echo "rank=${SLURM_PROCID} local_rank=${SLURM_LOCALID} cuda_visible_devices=${CUDA_VISIBLE_DEVICES}"
+          nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader
+        resources:
+          requests:
+            cpu: "16"
+            memory: "8Gi"
+  backoffLimit: 0
+```
+
+Apply it with:
+
+```bash
+kubectl apply -f perlmutter-gpu-ranks.yaml
+```
+
+Behind the scenes:
+
+1. The Kubernetes API server stores the `Job`; the Kubernetes Job controller creates a Pod from the job template.
+2. The Kubernetes scheduler sees `nodeSelector.kubernetes.io/hostname: perlmutter-vk` and binds the Pod to the virtual node served by this provider.
+3. Virtual Kubelet calls the NERSC provider's `CreatePod` for that Pod.
+4. The provider reads `nersc.sf/tokenSecretName` from the Pod annotations and loads that Secret from the workload namespace. This token is used only for this workload's Superfacility API calls.
+5. The provider translates the Pod into a Slurm batch script. The annotations above render allocation directives for two GPU nodes and a rank launcher equivalent to:
+
+```bash
+srun --ntasks=8 --ntasks-per-node=4 --cpus-per-task=16 --gpus-per-task=1 podman-hpc run --rm registry.example.com/cuda-runtime:latest ...
+```
+
+6. The provider submits the script to the Superfacility API, which submits the job to Slurm on Perlmutter.
+7. Slurm allocates two GPU nodes. `srun` starts eight ranks total, four ranks per node, with one GPU per rank.
+8. Each rank runs the container command and prints its Slurm rank, local rank, `CUDA_VISIBLE_DEVICES`, and visible GPU information.
+9. The provider polls the Superfacility API for job status and maps Slurm state back to Kubernetes Pod phase. `kubectl logs job/perlmutter-gpu-ranks` retrieves the Slurm job logs through the provider.
+
 ---
 
 ## Sidecar Containers

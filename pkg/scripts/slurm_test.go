@@ -57,6 +57,27 @@ func TestSingleContainerScriptQuotesArgumentsAndCreatesVolumeDirs(t *testing.T) 
 	}
 }
 
+func TestSlurmScriptRejectsNilPod(t *testing.T) {
+	_, err := PodToSlurmPodmanWithVolumes(nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "pod is required") {
+		t.Fatalf("error = %v, want pod required error", err)
+	}
+}
+
+func TestSlurmScriptRejectsPodWithoutContainers(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "empty"}}
+
+	_, err := PodToSlurmPodmanWithVolumes(pod, nil)
+	if err == nil || !strings.Contains(err.Error(), "has no containers") {
+		t.Fatalf("error = %v, want no containers error", err)
+	}
+
+	_, err = PodToSlurmPodmanMultiWithVolumes(pod, nil)
+	if err == nil || !strings.Contains(err.Error(), "has no containers") {
+		t.Fatalf("multi error = %v, want no containers error", err)
+	}
+}
+
 func TestMultiContainerScriptRunsMainContainerAndCleansUpSidecars(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

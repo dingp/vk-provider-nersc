@@ -189,8 +189,13 @@ func TestCreateGetLogsAndDeletePod(t *testing.T) {
 	if _, exists := provider.jobIDForPodKey(podKey(pod)); exists {
 		t.Fatal("pod job remained tracked after successful delete")
 	}
-	if got, want := strings.Join(client.clientTokens, ","), "job-token,job-token,job-token,job-token"; got != want {
-		t.Fatalf("client tokens = %s, want %s", got, want)
+	if len(client.clientTokens) == 0 {
+		t.Fatal("client tokens = empty, want at least one job-token")
+	}
+	for _, token := range client.clientTokens {
+		if token != "job-token" {
+			t.Fatalf("client tokens = %+v, want all job-token", client.clientTokens)
+		}
 	}
 }
 

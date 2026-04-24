@@ -56,6 +56,10 @@ type slurmOptions struct {
 }
 
 func PodToSlurmPodmanWithVolumes(pod *corev1.Pod, volPaths map[string]string) (string, error) {
+	if err := validatePodForSlurmScript(pod); err != nil {
+		return "", err
+	}
+
 	opts, err := slurmOptionsFromPod(pod)
 	if err != nil {
 		return "", err
@@ -75,6 +79,10 @@ set -euo pipefail
 }
 
 func PodToSlurmPodmanMultiWithVolumes(pod *corev1.Pod, volPaths map[string]string) (string, error) {
+	if err := validatePodForSlurmScript(pod); err != nil {
+		return "", err
+	}
+
 	opts, err := slurmOptionsFromPod(pod)
 	if err != nil {
 		return "", err
@@ -106,6 +114,16 @@ trap cleanup EXIT
 	}
 	fmt.Fprintf(sb, "%s\n", containerRunCommand(mainContainer, volPaths, true))
 	return sb.String(), nil
+}
+
+func validatePodForSlurmScript(pod *corev1.Pod) error {
+	if pod == nil {
+		return fmt.Errorf("pod is required")
+	}
+	if len(pod.Spec.Containers) == 0 {
+		return fmt.Errorf("pod %s has no containers", pod.Name)
+	}
+	return nil
 }
 
 func slurmOptionsFromPod(pod *corev1.Pod) (slurmOptions, error) {

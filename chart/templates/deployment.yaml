@@ -29,9 +29,25 @@ spec:
               key: token
         - name: VK_NODE_NAME
           value: "{{ .Values.vkNodeName }}"
-{{- if .Values.extraEnv }}
-{{- range .Values.extraEnv }}
+{{- with .Values.extraEnv }}
+{{- range . }}
         - name: {{ .name }}
           value: "{{ .value }}"
 {{- end }}
+{{- end }}
+{{- with .Values.resources }}
+        resources:
+{{ toYaml . | indent 10 }}
+{{- end }}
+{{- with .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.tolerations }}
+      tolerations:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.affinity }}
+      affinity:
+{{ toYaml . | indent 8 }}
 {{- end }}

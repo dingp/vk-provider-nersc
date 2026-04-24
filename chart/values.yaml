@@ -34,7 +34,9 @@ statefulset:
   replicas: 2
   project: m1234
   inputSource: "globus://endpoint-id/path/to/data"
+  inputVolume: data
   outputDest: "globus://endpoint-id/path/to/output"
+  outputVolume: data
   stageOut: "true"
   nodeSelector: perlmutter-vk
   container:

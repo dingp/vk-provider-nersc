@@ -3,12 +3,11 @@
 replicaCount: 1
 
 image:
-  repository: registry.example.com/vk-provider-nersc
+  repository: ghcr.io/dingp/vk-provider-nersc
   tag: latest
   pullPolicy: IfNotPresent
 
 sfApiEndpoint: "https://api.nersc.gov/api/v1.2"
-sfApiToken: "" # Will be stored in secret
 
 vkNodeName: "perlmutter-vk"
 
@@ -32,7 +31,9 @@ statefulset:
   enabled: false
   name: hpc-stateful
   replicas: 2
-  project: m1234
+  account: m1234
+  tokenSecretName: sf-api-token
+  tokenSecretKey: token
   inputSource: "globus://endpoint-id/path/to/data"
   inputVolume: data
   outputDest: "globus://endpoint-id/path/to/output"

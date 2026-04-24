@@ -16,6 +16,7 @@ import (
 
 type fakeJobClient struct {
 	mu              sync.Mutex
+	clientTokens    []string
 	submitJobID     string
 	submitReq       superfacility.JobSubmissionRequest
 	submitCount     int
@@ -87,20 +88,49 @@ func (f *fakeJobClient) CheckGlobusTransfer(ctx context.Context, transferID stri
 	return result, nil
 }
 
+type staticTokenResolver string
+
+func (r staticTokenResolver) TokenForPod(ctx context.Context, pod *corev1.Pod) (string, error) {
+	return string(r), nil
+}
+
+type failingTokenResolver struct {
+	err error
+}
+
+func (r failingTokenResolver) TokenForPod(ctx context.Context, pod *corev1.Pod) (string, error) {
+	return "", r.err
+}
+
+func newTestProvider(client *fakeJobClient) *NerscProvider {
+	return &NerscProvider{
+		sfClientFactory: func(token string) jobClient {
+			client.mu.Lock()
+			client.clientTokens = append(client.clientTokens, token)
+			client.mu.Unlock()
+			return client
+		},
+		tokenResolver: staticTokenResolver("job-token"),
+		nodeName:      "perlmutter-vk",
+		podMap:        make(map[string]podJobState),
+		stagingMap:    make(map[string]*podStagingState),
+	}
+}
+
 func TestNewNerscProviderValidatesConfig(t *testing.T) {
 	tests := []struct {
-		name     string
-		endpoint string
-		token    string
+		name          string
+		endpoint      string
+		tokenResolver TokenResolver
 	}{
-		{name: "missing endpoint", endpoint: "", token: "token"},
-		{name: "relative endpoint", endpoint: "/api/v1.2", token: "token"},
-		{name: "missing token", endpoint: "https://api.nersc.gov/api/v1.2", token: ""},
+		{name: "missing endpoint", endpoint: "", tokenResolver: staticTokenResolver("token")},
+		{name: "relative endpoint", endpoint: "/api/v1.2", tokenResolver: staticTokenResolver("token")},
+		{name: "missing token resolver", endpoint: "https://api.nersc.gov/api/v1.2"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := NewNerscProvider(tt.endpoint, tt.token, "node"); err == nil {
+			if _, err := NewNerscProvider(tt.endpoint, "node", tt.tokenResolver); err == nil {
 				t.Fatal("NewNerscProvider returned nil error")
 			}
 		})
@@ -113,11 +143,7 @@ func TestCreateGetLogsAndDeletePod(t *testing.T) {
 		statusByJob: map[string]string{"job-1": "running"},
 		logsByJob:   map[string]string{"job-1": "hello\n"},
 	}
-	provider := &NerscProvider{
-		sfClient: client,
-		nodeName: "perlmutter-vk",
-		podMap:   make(map[string]string),
-	}
+	provider := newTestProvider(client)
 	pod := testPod()
 
 	if err := provider.CreatePod(context.Background(), pod); err != nil {
@@ -128,6 +154,9 @@ func TestCreateGetLogsAndDeletePod(t *testing.T) {
 	}
 	if client.submitReq.Project != "m1234" {
 		t.Fatalf("submitted project = %q, want m1234", client.submitReq.Project)
+	}
+	if !strings.Contains(client.submitReq.Script, "#SBATCH --account=m1234") {
+		t.Fatalf("submitted script missing Slurm account directive:\n%s", client.submitReq.Script)
 	}
 
 	status, err := provider.GetPodStatus(context.Background(), pod.Namespace, pod.Name)
@@ -160,16 +189,21 @@ func TestCreateGetLogsAndDeletePod(t *testing.T) {
 	if _, exists := provider.jobIDForPodKey(podKey(pod)); exists {
 		t.Fatal("pod job remained tracked after successful delete")
 	}
+	if len(client.clientTokens) == 0 {
+		t.Fatal("client tokens = empty, want at least one job-token")
+	}
+	for _, token := range client.clientTokens {
+		if token != "job-token" {
+			t.Fatalf("client tokens = %+v, want all job-token", client.clientTokens)
+		}
+	}
 }
 
 func TestCreatePodIsIdempotentForTrackedPod(t *testing.T) {
 	client := &fakeJobClient{submitJobID: "job-2"}
 	pod := testPod()
-	provider := &NerscProvider{
-		sfClient: client,
-		nodeName: "perlmutter-vk",
-		podMap:   map[string]string{podKey(pod): "job-1"},
-	}
+	provider := newTestProvider(client)
+	provider.podMap[podKey(pod)] = podJobState{jobID: "job-1", token: "job-token"}
 
 	if err := provider.CreatePod(context.Background(), pod); err != nil {
 		t.Fatalf("CreatePod returned error: %v", err)
@@ -183,11 +217,8 @@ func TestDeletePodKeepsTrackingWhenCancelFails(t *testing.T) {
 	cancelErr := errors.New("cancel unavailable")
 	client := &fakeJobClient{cancelErr: cancelErr}
 	pod := testPod()
-	provider := &NerscProvider{
-		sfClient: client,
-		nodeName: "perlmutter-vk",
-		podMap:   map[string]string{podKey(pod): "job-1"},
-	}
+	provider := newTestProvider(client)
+	provider.podMap[podKey(pod)] = podJobState{jobID: "job-1", token: "job-token"}
 
 	err := provider.DeletePod(context.Background(), pod)
 	if !errors.Is(err, cancelErr) {
@@ -199,16 +230,28 @@ func TestDeletePodKeepsTrackingWhenCancelFails(t *testing.T) {
 }
 
 func TestCreatePodRequiresContainer(t *testing.T) {
-	provider := &NerscProvider{
-		sfClient: &fakeJobClient{},
-		nodeName: "perlmutter-vk",
-		podMap:   make(map[string]string),
-	}
+	provider := newTestProvider(&fakeJobClient{})
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "default"}}
 
 	err := provider.CreatePod(context.Background(), pod)
 	if err == nil || !strings.Contains(err.Error(), "has no containers") {
 		t.Fatalf("error = %v, want no containers", err)
+	}
+}
+
+func TestCreatePodRequiresSuperfacilityToken(t *testing.T) {
+	tokenErr := errors.New("missing token secret")
+	client := &fakeJobClient{}
+	provider := newTestProvider(client)
+	provider.tokenResolver = failingTokenResolver{err: tokenErr}
+	pod := testPod()
+
+	err := provider.CreatePod(context.Background(), pod)
+	if !errors.Is(err, tokenErr) {
+		t.Fatalf("CreatePod error = %v, want %v", err, tokenErr)
+	}
+	if client.submitCount != 0 {
+		t.Fatalf("submitCount = %d, want 0", client.submitCount)
 	}
 }
 
@@ -222,11 +265,7 @@ func TestCreatePodStagesInputBeforeSubmittingJob(t *testing.T) {
 			"input-transfer": {{GlobusUUID: "input-transfer", Status: "SUCCEEDED"}},
 		},
 	}
-	provider := &NerscProvider{
-		sfClient: client,
-		nodeName: "perlmutter-vk",
-		podMap:   make(map[string]string),
-	}
+	provider := newTestProvider(client)
 	pod := testPod()
 	pod.Annotations[annotationInputSource] = "globus://dtn/global/cfs/cdirs/m1234/input"
 	pod.Annotations[annotationInputVolume] = "data"
@@ -265,11 +304,7 @@ func TestGetPodStatusStagesOutputAfterJobSucceeds(t *testing.T) {
 			"output-transfer": {{GlobusUUID: "output-transfer", Status: "SUCCEEDED"}},
 		},
 	}
-	provider := &NerscProvider{
-		sfClient: client,
-		nodeName: "perlmutter-vk",
-		podMap:   make(map[string]string),
-	}
+	provider := newTestProvider(client)
 	pod := testPod()
 	pod.Annotations[annotationStageOut] = "true"
 	pod.Annotations[annotationOutputDest] = "globus://dtn/global/cfs/cdirs/m1234/output"
@@ -303,11 +338,7 @@ func TestGetPodStatusStagesOutputAfterJobSucceeds(t *testing.T) {
 }
 
 func TestCreatePodRequiresStageVolumeWhenStagingWithMultipleVolumes(t *testing.T) {
-	provider := &NerscProvider{
-		sfClient: &fakeJobClient{},
-		nodeName: "perlmutter-vk",
-		podMap:   make(map[string]string),
-	}
+	provider := newTestProvider(&fakeJobClient{})
 	pod := testPod()
 	pod.Annotations[annotationInputSource] = "globus://dtn/global/cfs/cdirs/m1234/input"
 	pod.Spec.Volumes = []corev1.Volume{{Name: "data"}, {Name: "work"}}
@@ -324,7 +355,7 @@ func testPod() *corev1.Pod {
 			Name:      "demo",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"nersc.sf/project": "m1234",
+				annotationSlurmAccount: "m1234",
 			},
 		},
 		Spec: corev1.PodSpec{

@@ -17,15 +17,9 @@ import (
 
 func main() {
 	endpoint := os.Getenv("SF_API_ENDPOINT")
-	token := os.Getenv("SF_API_TOKEN")
 	nodeName := os.Getenv("VK_NODE_NAME")
 	if nodeName == "" {
 		nodeName = "perlmutter-vk"
-	}
-
-	prov, err := provider.NewNerscProvider(endpoint, token, nodeName)
-	if err != nil {
-		log.Fatalf("Failed to create provider: %v", err)
 	}
 
 	// Create Kubernetes client
@@ -45,6 +39,11 @@ func main() {
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		log.Fatalf("Failed to create Kubernetes client: %v", err)
+	}
+
+	prov, err := provider.NewNerscProvider(endpoint, nodeName, provider.NewSecretTokenResolver(clientset.CoreV1()))
+	if err != nil {
+		log.Fatalf("Failed to create provider: %v", err)
 	}
 
 	// Create the virtual node

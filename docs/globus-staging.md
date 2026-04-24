@@ -8,6 +8,7 @@ Annotate your Pod:
 ```yaml
 metadata:
   annotations:
+    nersc.sf/tokenSecretName: "sf-api-token"
     nersc.sf/inputSource: "globus://<endpoint-id>/path/to/input"
     nersc.sf/inputVolume: "data"
 ```
@@ -20,6 +21,7 @@ VK will:
 ```yaml
 metadata:
   annotations:
+    nersc.sf/tokenSecretName: "sf-api-token"
     nersc.sf/outputDest: "globus://<endpoint-id>/path/to/output"
     nersc.sf/stageOut: "true"
     nersc.sf/outputVolume: "data"
@@ -30,7 +32,7 @@ VK will:
 
 ## Tips
 - Omit staging annotations when input and output already live on scratch and should remain there.
-- The Superfacility API token must come from a client with Globus enabled.
+- The per-workload Superfacility API token Secret must contain a token with Globus enabled.
 - With multiple volumes, set `nersc.sf/inputVolume`, `nersc.sf/outputVolume`, or shared `nersc.sf/stageVolume`.
 - Ensure your Globus endpoint is accessible from NERSC.
 - Large transfers may require increasing VK's transfer timeout.

@@ -13,7 +13,6 @@ test:
 
 run:
 	SF_API_ENDPOINT=https://api.nersc.gov/api/v1.2 \
-	SF_API_TOKEN=$(SF_API_TOKEN) \
 	VK_NODE_NAME=perlmutter-vk \
 	./bin/$(BINARY_NAME)
 

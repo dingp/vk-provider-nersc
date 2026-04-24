@@ -22,11 +22,6 @@ spec:
         env:
         - name: SF_API_ENDPOINT
           value: "{{ .Values.sfApiEndpoint }}"
-        - name: SF_API_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: sf-api-token
-              key: token
         - name: VK_NODE_NAME
           value: "{{ .Values.vkNodeName }}"
 {{- with .Values.extraEnv }}

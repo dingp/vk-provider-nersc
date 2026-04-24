@@ -4,6 +4,10 @@ metadata:
   name: hpc-job
 spec:
   template:
+    metadata:
+      annotations:
+        nersc.slurm/account: "m1234"
+        nersc.sf/tokenSecretName: "sf-api-token"
     spec:
       nodeSelector:
         kubernetes.io/hostname: perlmutter-vk

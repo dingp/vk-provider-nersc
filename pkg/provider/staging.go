@@ -140,8 +140,8 @@ func getBoolAnnotation(pod *corev1.Pod, key string) (bool, error) {
 	return parsed, nil
 }
 
-func (p *NerscProvider) startAndWaitForTransfer(ctx context.Context, req superfacility.GlobusTransferRequest) (string, error) {
-	transfer, err := p.sfClient.StartGlobusTransfer(ctx, req)
+func (p *NerscProvider) startAndWaitForTransfer(ctx context.Context, client jobClient, req superfacility.GlobusTransferRequest) (string, error) {
+	transfer, err := client.StartGlobusTransfer(ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -160,7 +160,7 @@ func (p *NerscProvider) startAndWaitForTransfer(ctx context.Context, req superfa
 	defer cancel()
 
 	for {
-		result, err := p.sfClient.CheckGlobusTransfer(waitCtx, transferID)
+		result, err := client.CheckGlobusTransfer(waitCtx, transferID)
 		if err != nil {
 			return transferID, err
 		}
@@ -182,7 +182,14 @@ func (p *NerscProvider) startAndWaitForTransfer(ctx context.Context, req superfa
 	}
 }
 
-func (p *NerscProvider) reconcileStageOut(ctx context.Context, key string) corev1.PodStatus {
+func (p *NerscProvider) reconcileStageOut(ctx context.Context, key, token string) corev1.PodStatus {
+	client, err := p.clientForToken(token)
+	if err != nil {
+		msg := fmt.Sprintf("create Superfacility client: %v", err)
+		p.setStageOutStatus(key, transferFailed, "", msg)
+		return podStatus(corev1.PodFailed, "StageOutFailed", msg)
+	}
+
 	req, transferID, status, outputErr := p.stageOutSnapshot(key)
 	switch status {
 	case transferSucceeded:
@@ -195,7 +202,7 @@ func (p *NerscProvider) reconcileStageOut(ctx context.Context, key string) corev
 
 	if status == transferNotStarted {
 		p.setStageOutStatus(key, transferStarting, "", "")
-		transfer, err := p.sfClient.StartGlobusTransfer(ctx, req)
+		transfer, err := client.StartGlobusTransfer(ctx, req)
 		if err != nil {
 			msg := fmt.Sprintf("start output transfer: %v", err)
 			p.setStageOutStatus(key, transferFailed, "", msg)
@@ -206,7 +213,7 @@ func (p *NerscProvider) reconcileStageOut(ctx context.Context, key string) corev
 		log.Printf("Pod %s output stage-out started as Globus transfer %s", key, transferID)
 	}
 
-	result, err := p.sfClient.CheckGlobusTransfer(ctx, transferID)
+	result, err := client.CheckGlobusTransfer(ctx, transferID)
 	if err != nil {
 		msg := fmt.Sprintf("check output transfer %s: %v", transferID, err)
 		p.setStageOutStatus(key, transferFailed, transferID, msg)

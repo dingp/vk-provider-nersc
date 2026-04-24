@@ -12,6 +12,9 @@ rules:
   resources: ["pods", "pods/log", "persistentvolumeclaims"]
   verbs: ["get", "list", "watch"]
 - apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+- apiGroups: [""]
   resources: ["nodes"]
   verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
@@ -45,23 +48,10 @@ spec:
       serviceAccountName: vk-nersc
       containers:
       - name: vk-nersc
-        image: registry.example.com/vk-provider-nersc:latest
+        image: ghcr.io/dingp/vk-provider-nersc:latest
         imagePullPolicy: IfNotPresent
         env:
         - name: SF_API_ENDPOINT
           value: "https://api.nersc.gov/api/v1.2"
-        - name: SF_API_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: sf-api-token
-              key: token
         - name: VK_NODE_NAME
           value: "perlmutter-vk"
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: sf-api-token
-type: Opaque
-stringData:
-  token: "<YOUR_SUPERFACILITY_API_TOKEN>"

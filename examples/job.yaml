@@ -6,7 +6,7 @@ spec:
   template:
     metadata:
       annotations:
-        nersc.sf/project: "m1234"
+        nersc.slurm/account: "m1234"
         nersc.sf/tokenSecretName: "sf-api-token"
     spec:
       nodeSelector:

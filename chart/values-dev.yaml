@@ -40,7 +40,7 @@ statefulset:
   enabled: false
   name: hpc-stateful-dev
   replicas: 1
-  project: m9999
+  account: m9999
   tokenSecretName: sf-api-token
   tokenSecretKey: token
   inputSource: ""

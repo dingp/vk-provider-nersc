@@ -17,7 +17,7 @@ kind: Pod
 metadata:
   name: gpu-rank-test
   annotations:
-    nersc.sf/project: "m1234"
+    nersc.slurm/account: "m1234"
     nersc.sf/tokenSecretName: "sf-api-token"
     nersc.slurm/nodes: "2"
     nersc.slurm/ntasks: "8"

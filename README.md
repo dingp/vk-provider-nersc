@@ -132,7 +132,7 @@ By default, the provider runs the container once with `podman-hpc run` inside th
 ```yaml
 metadata:
   annotations:
-    nersc.sf/project: "m1234"
+    nersc.slurm/account: "m1234"
     nersc.slurm/nodes: "4"
     nersc.slurm/ntasks: "16"
     nersc.slurm/tasks-per-node: "4"
@@ -162,13 +162,13 @@ Supported Slurm annotations:
 | `nersc.slurm/partition` | `#SBATCH --partition`; defaults to `regular`. |
 | `nersc.slurm/qos` | `#SBATCH --qos`; omitted by default. |
 | `nersc.slurm/constraint` | `#SBATCH --constraint`; omitted by default. |
-| `nersc.slurm/account` | `#SBATCH --account`; omitted by default. `nersc.sf/project` is still sent to the Superfacility API request. |
+| `nersc.slurm/account` | `#SBATCH --account`; omitted by default. The provider also sends this value as the Superfacility API job `project`. |
 
 Invalid annotation values fail pod submission before the Slurm job is created.
 
 ### Example: 2 GPU Nodes, 8 GPU Ranks
 
-Create the per-workload token Secret, then submit a Kubernetes `Job` that targets the virtual Perlmutter node. Replace the project, token, and image with values for your account and workload.
+Create the per-workload token Secret, then submit a Kubernetes `Job` that targets the virtual Perlmutter node. Replace the Slurm account, token, and image with values for your account and workload.
 
 ```bash
 kubectl create secret generic sf-api-token \
@@ -184,7 +184,7 @@ spec:
   template:
     metadata:
       annotations:
-        nersc.sf/project: "m1234"
+        nersc.slurm/account: "m1234"
         nersc.sf/tokenSecretName: "sf-api-token"
         nersc.slurm/nodes: "2"
         nersc.slurm/ntasks: "8"
@@ -257,6 +257,7 @@ srun launches 8 podman-hpc container ranks
 
 ```text
 Kubernetes Job annotations
+  nersc.slurm/account:        "m1234"
   nersc.slurm/nodes:          "2"
   nersc.slurm/ntasks:         "8"
   nersc.slurm/tasks-per-node: "4"
@@ -266,6 +267,7 @@ Kubernetes Job annotations
           |
           v
 Slurm allocation
+  #SBATCH --account=m1234
   #SBATCH --nodes=2
   #SBATCH --ntasks=8
   #SBATCH --ntasks-per-node=4
@@ -310,7 +312,7 @@ kind: Pod
 metadata:
   name: compute-with-sidecar
   annotations:
-    nersc.sf/project: "m1234"
+    nersc.slurm/account: "m1234"
     nersc.sf/tokenSecretName: "sf-api-token"
     nersc.vk/mainContainer: "worker"
     nersc.slurm/nodes: "1"
@@ -352,7 +354,7 @@ spec:
       labels:
         app: hpc-stateful
       annotations:
-        nersc.sf/project: "m1234"
+        nersc.slurm/account: "m1234"
         nersc.sf/tokenSecretName: "sf-api-token"
         nersc.sf/inputSource: "globus://endpoint-id/path/to/data"
         nersc.sf/outputDest: "globus://endpoint-id/path/to/output"

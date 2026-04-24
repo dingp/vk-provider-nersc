@@ -53,6 +53,7 @@ const (
 
 	annotationTokenSecretName = "nersc.sf/tokenSecretName"
 	annotationTokenSecretKey  = "nersc.sf/tokenSecretKey"
+	annotationSlurmAccount    = "nersc.slurm/account"
 	annotationInputSource     = "nersc.sf/inputSource"
 	annotationOutputDest      = "nersc.sf/outputDest"
 	annotationStageOut        = "nersc.sf/stageOut"
@@ -201,7 +202,7 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 		Script:  script,
 		System:  "perlmutter",
 		Queue:   "regular",
-		Project: getProjectFromAnnotations(pod),
+		Project: projectFromSlurmAccount(pod),
 	})
 	if err != nil {
 		return err
@@ -547,11 +548,8 @@ func detectStatefulSet(pod *corev1.Pod) (string, int) {
 	return "", 0
 }
 
-func getProjectFromAnnotations(pod *corev1.Pod) string {
-	if proj, ok := pod.Annotations["nersc.sf/project"]; ok {
-		return proj
-	}
-	return ""
+func projectFromSlurmAccount(pod *corev1.Pod) string {
+	return getAnnotation(pod, annotationSlurmAccount)
 }
 
 func podKey(pod *corev1.Pod) string {

@@ -22,7 +22,7 @@ statefulset:
   enabled: true
   name: hpc-stateful
   replicas: 3
-  project: m1234
+  account: m1234
   tokenSecretName: sf-api-token
   tokenSecretKey: token
   inputSource: "globus://endpoint-id/path/to/data"

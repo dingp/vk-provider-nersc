@@ -155,6 +155,9 @@ func TestCreateGetLogsAndDeletePod(t *testing.T) {
 	if client.submitReq.Project != "m1234" {
 		t.Fatalf("submitted project = %q, want m1234", client.submitReq.Project)
 	}
+	if !strings.Contains(client.submitReq.Script, "#SBATCH --account=m1234") {
+		t.Fatalf("submitted script missing Slurm account directive:\n%s", client.submitReq.Script)
+	}
 
 	status, err := provider.GetPodStatus(context.Background(), pod.Namespace, pod.Name)
 	if err != nil {
@@ -347,7 +350,7 @@ func testPod() *corev1.Pod {
 			Name:      "demo",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"nersc.sf/project": "m1234",
+				annotationSlurmAccount: "m1234",
 			},
 		},
 		Spec: corev1.PodSpec{

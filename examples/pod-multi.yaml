@@ -3,7 +3,7 @@ kind: Pod
 metadata:
   name: multi-test
   annotations:
-    nersc.sf/project: "m1234"
+    nersc.slurm/account: "m1234"
     nersc.sf/tokenSecretName: "sf-api-token"
     nersc.vk/mainContainer: "worker"
 spec:

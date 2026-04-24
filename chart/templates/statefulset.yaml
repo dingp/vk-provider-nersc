@@ -16,7 +16,7 @@ spec:
       labels:
         app: {{ .Values.statefulset.name }}
       annotations:
-        nersc.sf/project: "{{ .Values.statefulset.project }}"
+        nersc.slurm/account: "{{ .Values.statefulset.account }}"
         nersc.sf/tokenSecretName: "{{ .Values.statefulset.tokenSecretName }}"
 {{- with .Values.statefulset.tokenSecretKey }}
         nersc.sf/tokenSecretKey: "{{ . }}"

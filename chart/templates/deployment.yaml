@@ -29,8 +29,8 @@ spec:
               key: token
         - name: VK_NODE_NAME
           value: "{{ .Values.vkNodeName }}"
-{{- if .Values.extraEnv }}
-{{- range .Values.extraEnv }}
+{{- with .Values.extraEnv }}
+{{- range . }}
         - name: {{ .name }}
           value: "{{ .value }}"
 {{- end }}

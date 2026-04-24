@@ -98,7 +98,7 @@ func (r GlobusTransferResult) Summary() string {
 
 func (r GlobusTransferResult) IsComplete() (bool, bool) {
 	if r.Successful != nil {
-		return *r.Successful, !*r.Successful
+		return true, !*r.Successful
 	}
 	if r.Done != nil && !*r.Done {
 		return false, false

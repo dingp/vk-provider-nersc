@@ -88,14 +88,18 @@ func parseGlobusLocation(raw string) (*globusLocation, error) {
 }
 
 func resolveStagePath(pod *corev1.Pod, jobScratchBase string, volumeScratchPaths map[string]string, specificAnnotation string) (string, error) {
+	annotationUsed := specificAnnotation
 	stageVolume := getAnnotation(pod, specificAnnotation)
 	if stageVolume == "" {
 		stageVolume = getAnnotation(pod, annotationStageVolume)
+		if stageVolume != "" {
+			annotationUsed = annotationStageVolume
+		}
 	}
 	if stageVolume != "" {
 		path, ok := volumeScratchPaths[stageVolume]
 		if !ok {
-			return "", fmt.Errorf("%s references unknown volume %q", specificAnnotation, stageVolume)
+			return "", fmt.Errorf("%s references unknown volume %q", annotationUsed, stageVolume)
 		}
 		return path, nil
 	}

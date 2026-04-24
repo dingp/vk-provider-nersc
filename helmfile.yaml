@@ -11,7 +11,6 @@ releases:
     chart: ./chart
     values:
       - chart/values-dev.yaml
-    secrets:
       - sfApiToken: "{{ requiredEnv 'SF_API_TOKEN_DEV' }}"
     installed: true
 
@@ -21,6 +20,5 @@ releases:
     chart: ./chart
     values:
       - chart/values-production.yaml
-    secrets:
       - sfApiToken: "{{ requiredEnv 'SF_API_TOKEN_PROD' }}"
     installed: true

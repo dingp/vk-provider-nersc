@@ -1,6 +1,6 @@
 # Production configuration for Virtual Kubelet NERSC provider
 
-replicaCount: 3  # Run multiple VK nodes for HA
+replicaCount: 1  # One provider instance owns one Virtual Kubelet node name
 
 image:
   repository: registry.example.com/vk-provider-nersc

@@ -2,9 +2,14 @@ BINARY_NAME=vk-nersc
 
 all: build
 
-build:
+tidy:
 	go mod tidy
+
+build:
 	go build -o bin/$(BINARY_NAME) ./cmd/vk-nersc
+
+test:
+	go test ./...
 
 run:
 	SF_API_ENDPOINT=https://api.nersc.gov/api/v1.2 \

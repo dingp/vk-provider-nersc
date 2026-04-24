@@ -22,22 +22,24 @@ spec:
         nersc.sf/stageOut: "{{ .Values.statefulset.stageOut }}"
     spec:
       nodeSelector:
-        kubernetes.io/hostname: {{ .Values.statefulset.nodeSelector }}
+        kubernetes.io/hostname: {{ .Values.statefulset.nodeSelector | quote }}
       containers:
       - name: {{ .Values.statefulset.container.name }}
-        image: {{ .Values.statefulset.container.image }}
-        command: {{ toYaml .Values.statefulset.container.command | nindent 8 }}
-        args: {{ toYaml .Values.statefulset.container.args | nindent 8 }}
+        image: {{ .Values.statefulset.container.image | quote }}
+        command:
+{{ toYaml .Values.statefulset.container.command | indent 10 }}
+        args:
+{{ toYaml .Values.statefulset.container.args | indent 10 }}
         volumeMounts:
 {{- range .Values.statefulset.volumeMounts }}
         - name: {{ .name }}
-          mountPath: {{ .mountPath }}
+          mountPath: {{ .mountPath | quote }}
           readOnly: {{ .readOnly }}
 {{- end }}
       volumes:
 {{- range .Values.statefulset.volumes }}
       - name: {{ .name }}
         persistentVolumeClaim:
-          claimName: {{ .claimName }}
+          claimName: {{ .claimName | quote }}
 {{- end }}
 {{- end }}

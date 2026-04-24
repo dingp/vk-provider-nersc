@@ -223,6 +223,64 @@ kubectl apply -f perlmutter-gpu-ranks.yaml
 
 Behind the scenes:
 
+```text
+kubectl apply
+     |
+     v
+Kubernetes API server
+     |
+     v
+Job controller creates Pod
+     |
+     v
+Scheduler binds Pod to virtual node: perlmutter-vk
+     |
+     v
+Virtual Kubelet calls NERSC provider CreatePod
+     |
+     +--> read workload Secret: nersc.sf/tokenSecretName
+     |
+     +--> build Slurm batch script from Pod spec and annotations
+     |
+     v
+Superfacility API job submission
+     |
+     v
+Slurm queue on Perlmutter
+     |
+     v
+2 GPU nodes allocated
+     |
+     v
+srun launches 8 podman-hpc container ranks
+```
+
+```text
+Kubernetes Job annotations
+  nersc.slurm/nodes:          "2"
+  nersc.slurm/ntasks:         "8"
+  nersc.slurm/tasks-per-node: "4"
+  nersc.slurm/gpus-per-node:  "4"
+  nersc.slurm/gpus-per-task:  "1"
+  nersc.slurm/launcher:       "srun"
+          |
+          v
+Slurm allocation
+  #SBATCH --nodes=2
+  #SBATCH --ntasks=8
+  #SBATCH --ntasks-per-node=4
+  #SBATCH --gpus-per-node=4
+          |
+          v
+Rank launcher
+  srun --ntasks=8 --ntasks-per-node=4 --cpus-per-task=16 --gpus-per-task=1 podman-hpc run ...
+          |
+          v
+Runtime layout
+  node 1: rank 0 -> GPU 0   rank 1 -> GPU 1   rank 2 -> GPU 2   rank 3 -> GPU 3
+  node 2: rank 4 -> GPU 0   rank 5 -> GPU 1   rank 6 -> GPU 2   rank 7 -> GPU 3
+```
+
 1. The Kubernetes API server stores the `Job`; the Kubernetes Job controller creates a Pod from the job template.
 2. The Kubernetes scheduler sees `nodeSelector.kubernetes.io/hostname: perlmutter-vk` and binds the Pod to the virtual node served by this provider.
 3. Virtual Kubelet calls the NERSC provider's `CreatePod` for that Pod.

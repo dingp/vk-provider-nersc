@@ -3,8 +3,8 @@
 replicaCount: 1  # One provider instance owns one Virtual Kubelet node name
 
 image:
-  repository: registry.example.com/vk-provider-nersc
-  tag: stable
+  repository: ghcr.io/dingp/vk-provider-nersc
+  tag: latest
   pullPolicy: IfNotPresent
 
 sfApiEndpoint: "https://api.nersc.gov/api/v1.2"

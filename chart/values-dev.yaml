@@ -3,9 +3,9 @@
 replicaCount: 1  # Single VK node for dev/testing
 
 image:
-  repository: registry.example.com/vk-provider-nersc
-  tag: dev
-  pullPolicy: Always  # Always pull latest dev image
+  repository: ghcr.io/dingp/vk-provider-nersc
+  tag: latest
+  pullPolicy: Always  # Always pull latest image
 
 sfApiEndpoint: "https://api.nersc.gov/api/v1.2"
 sfApiToken: "" # Will be stored in secret

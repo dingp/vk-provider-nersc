@@ -63,8 +63,8 @@ export VK_NODE_NAME=perlmutter-vk
 ## Build & Push Docker Image
 
 ```bash
-docker build -t registry.example.com/vk-provider-nersc:dev .
-docker push registry.example.com/vk-provider-nersc:dev
+docker build -t ghcr.io/dingp/vk-provider-nersc:latest .
+docker push ghcr.io/dingp/vk-provider-nersc:latest
 ```
 
 ---

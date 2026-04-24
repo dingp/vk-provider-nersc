@@ -45,7 +45,7 @@ spec:
       serviceAccountName: vk-nersc
       containers:
       - name: vk-nersc
-        image: registry.example.com/vk-provider-nersc:latest
+        image: ghcr.io/dingp/vk-provider-nersc:latest
         imagePullPolicy: IfNotPresent
         env:
         - name: SF_API_ENDPOINT

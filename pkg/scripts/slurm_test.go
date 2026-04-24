@@ -49,15 +49,23 @@ func TestSingleContainerScriptQuotesArgumentsAndCreatesVolumeDirs(t *testing.T) 
 			t.Fatalf("script missing %q:\n%s", fragment, script)
 		}
 	}
+	if strings.Contains(script, "srun podman-hpc run") {
+		t.Fatalf("script should not implicitly wrap podman-hpc with srun:\n%s", script)
+	}
 }
 
-func TestMultiContainerScriptWaitsForEveryContainer(t *testing.T) {
+func TestMultiContainerScriptRunsMainContainerAndCleansUpSidecars(t *testing.T) {
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "demo",
+			Annotations: map[string]string{
+				"nersc.vk/mainContainer": "worker",
+			},
+		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
-				{Name: "one", Image: "image-one"},
-				{Name: "two", Image: "image-two"},
+				{Name: "sidecar", Image: "image-sidecar"},
+				{Name: "worker", Image: "image-worker"},
 			},
 		},
 	}
@@ -68,17 +76,21 @@ func TestMultiContainerScriptWaitsForEveryContainer(t *testing.T) {
 
 	wantFragments := []string{
 		`--pod "$POD_ID"`,
-		`pids+=("$!")`,
-		`if ! wait "$pid"; then`,
-		`exit "$status"`,
+		`cleanup() {`,
+		`podman-hpc pod stop "$POD_ID"`,
+		`trap cleanup EXIT`,
+		"podman-hpc run --rm --pod \"$POD_ID\" 'image-sidecar' &",
+		"podman-hpc run --rm --pod \"$POD_ID\" 'image-worker'",
 	}
 	for _, fragment := range wantFragments {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("script missing %q:\n%s", fragment, script)
 		}
 	}
-	if got := strings.Count(script, `pids+=("$!")`); got != 2 {
-		t.Fatalf("pid capture count = %d, want 2", got)
+	sidecarIndex := strings.Index(script, "'image-sidecar' &")
+	workerIndex := strings.Index(script, "'image-worker'")
+	if sidecarIndex == -1 || workerIndex == -1 || sidecarIndex > workerIndex {
+		t.Fatalf("sidecar should start before main container:\n%s", script)
 	}
 }
 
@@ -130,6 +142,50 @@ func TestSlurmAnnotationsRenderMultiNodeDirectives(t *testing.T) {
 	}
 }
 
+func TestSlurmLauncherRendersSrunExplicitly(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "rank-demo",
+			Annotations: map[string]string{
+				"nersc.slurm/nodes":          "2",
+				"nersc.slurm/ntasks":         "8",
+				"nersc.slurm/tasks-per-node": "4",
+				"nersc.slurm/cpus-per-task":  "8",
+				"nersc.slurm/gpus-per-node":  "4",
+				"nersc.slurm/gpus-per-task":  "1",
+				"nersc.slurm/launcher":       "srun",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "ranks", Image: "image", Command: []string{"bash", "-lc"}, Args: []string{"echo $SLURM_PROCID"}},
+			},
+		},
+	}
+
+	script, err := PodToSlurmPodmanWithVolumes(pod, nil)
+	if err != nil {
+		t.Fatalf("PodToSlurmPodmanWithVolumes returned error: %v", err)
+	}
+
+	wantFragments := []string{
+		"#SBATCH --nodes=2",
+		"#SBATCH --ntasks=8",
+		"#SBATCH --ntasks-per-node=4",
+		"#SBATCH --cpus-per-task=8",
+		"#SBATCH --gpus-per-node=4",
+		"srun --ntasks=8 --ntasks-per-node=4 --cpus-per-task=8 --gpus-per-task=1 podman-hpc run --rm 'image' 'bash' '-lc' 'echo $SLURM_PROCID'",
+	}
+	for _, fragment := range wantFragments {
+		if !strings.Contains(script, fragment) {
+			t.Fatalf("script missing %q:\n%s", fragment, script)
+		}
+	}
+	if strings.Contains(script, "#SBATCH --gpus-per-task") {
+		t.Fatalf("gpus-per-task should be rendered on the launcher, not as an allocation directive:\n%s", script)
+	}
+}
+
 func TestSlurmAnnotationValidationRejectsUnsafeValues(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -166,5 +222,87 @@ func TestSlurmAnnotationValidationRejectsConflictingGPUFields(t *testing.T) {
 	_, err := PodToSlurmPodmanWithVolumes(pod, nil)
 	if err == nil || !strings.Contains(err.Error(), "cannot both be set") {
 		t.Fatalf("error = %v, want GPU conflict validation error", err)
+	}
+}
+
+func TestSlurmAnnotationValidationRejectsUnsupportedLauncher(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "bad-launcher",
+			Annotations: map[string]string{
+				"nersc.slurm/launcher": "mpirun",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "image"}},
+		},
+	}
+
+	_, err := PodToSlurmPodmanWithVolumes(pod, nil)
+	if err == nil || !strings.Contains(err.Error(), "nersc.slurm/launcher") {
+		t.Fatalf("error = %v, want launcher validation error", err)
+	}
+}
+
+func TestSlurmAnnotationValidationRejectsGPUsPerTaskWithoutLauncher(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "unused-gpus-per-task",
+			Annotations: map[string]string{
+				"nersc.slurm/gpus-per-task": "1",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "image"}},
+		},
+	}
+
+	_, err := PodToSlurmPodmanWithVolumes(pod, nil)
+	if err == nil || !strings.Contains(err.Error(), "requires") {
+		t.Fatalf("error = %v, want gpus-per-task launcher validation error", err)
+	}
+}
+
+func TestSlurmAnnotationValidationRejectsLauncherForMultiContainerPods(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "multi-rank",
+			Annotations: map[string]string{
+				"nersc.slurm/launcher": "srun",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "one", Image: "image-one"},
+				{Name: "two", Image: "image-two"},
+			},
+		},
+	}
+
+	_, err := PodToSlurmPodmanMultiWithVolumes(pod, nil)
+	if err == nil || !strings.Contains(err.Error(), "single-container") {
+		t.Fatalf("error = %v, want multi-container launcher validation error", err)
+	}
+}
+
+func TestMultiContainerScriptRejectsUnknownMainContainer(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "multi-rank",
+			Annotations: map[string]string{
+				"nersc.vk/mainContainer": "missing",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "one", Image: "image-one"},
+				{Name: "two", Image: "image-two"},
+			},
+		},
+	}
+
+	_, err := PodToSlurmPodmanMultiWithVolumes(pod, nil)
+	if err == nil || !strings.Contains(err.Error(), "unknown container") {
+		t.Fatalf("error = %v, want main container validation error", err)
 	}
 }

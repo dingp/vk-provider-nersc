@@ -25,6 +25,8 @@ kind: Pod
 metadata:
   name: pvc-test-pod
   annotations:
+    nersc.sf/project: "m1234"
+    nersc.sf/tokenSecretName: "sf-api-token"
     nersc.sf/inputSource: "globus://endpoint-id/path/to/input"
     nersc.sf/inputVolume: "input"
     nersc.sf/outputDest: "globus://endpoint-id/path/to/output"

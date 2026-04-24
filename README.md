@@ -54,10 +54,11 @@ vk-provider-nersc/
 ```bash
 make build
 export SF_API_ENDPOINT=https://api.nersc.gov/api/v1.2
-export SF_API_TOKEN=<your_token>
 export VK_NODE_NAME=perlmutter-vk
 ./bin/vk-nersc
 ```
+
+Workloads provide their own Superfacility API token through a Kubernetes Secret referenced by pod annotations.
 
 ---
 
@@ -74,14 +75,12 @@ docker push ghcr.io/dingp/vk-provider-nersc:latest
 
 ### Dev Deployment
 ```bash
-helm install vk-nersc ./chart -f chart/values-dev.yaml \
-  --set sfApiToken=<your_token>
+helm install vk-nersc ./chart -f chart/values-dev.yaml
 ```
 
 ### Production Deployment
 ```bash
-helm install vk-nersc ./chart -f chart/values-production.yaml \
-  --set sfApiToken=<your_token>
+helm install vk-nersc ./chart -f chart/values-production.yaml
 ```
 
 ---
@@ -89,10 +88,28 @@ helm install vk-nersc ./chart -f chart/values-production.yaml \
 ## Deploy Both Dev & Prod with Helmfile
 
 ```bash
-export SF_API_TOKEN_DEV=<dev_token>
-export SF_API_TOKEN_PROD=<prod_token>
 helmfile apply
 ```
+
+---
+
+## Workload Authentication
+
+The provider does not use a global Superfacility API token. Each workload must reference a Kubernetes Secret in the workload namespace:
+
+```bash
+kubectl create secret generic sf-api-token \
+  --from-literal=token=<your_superfacility_api_token>
+```
+
+```yaml
+metadata:
+  annotations:
+    nersc.sf/tokenSecretName: "sf-api-token"
+    nersc.sf/tokenSecretKey: "token"
+```
+
+`nersc.sf/tokenSecretKey` defaults to `token`. The same token is used for job submit, status, logs, cancel, and optional Globus stage-in/out for that pod.
 
 ---
 
@@ -110,14 +127,19 @@ By default, each pod is submitted as a conservative single-node Slurm job:
 
 Set Slurm-specific resource needs on the pod annotations. Kubernetes CPU/memory requests are useful for Kubernetes scheduling metadata, but they do not express Slurm topology such as node count, tasks per node, GPU layout, or walltime.
 
+By default, the provider runs the container once with `podman-hpc run` inside the Slurm allocation. Set `nersc.slurm/launcher: "srun"` when the pod should be launched as Slurm ranks. In that mode, the container command is the per-rank payload; do not wrap it in another `srun podman-hpc run`.
+
 ```yaml
 metadata:
   annotations:
     nersc.sf/project: "m1234"
     nersc.slurm/nodes: "4"
-    nersc.slurm/tasks-per-node: "8"
+    nersc.slurm/ntasks: "16"
+    nersc.slurm/tasks-per-node: "4"
     nersc.slurm/cpus-per-task: "16"
     nersc.slurm/gpus-per-node: "4"
+    nersc.slurm/gpus-per-task: "1"
+    nersc.slurm/launcher: "srun"
     nersc.slurm/mem: "128GB"
     nersc.slurm/time: "02:00:00"
     nersc.slurm/partition: "regular"
@@ -133,6 +155,8 @@ Supported Slurm annotations:
 | `nersc.slurm/cpus-per-task` | `#SBATCH --cpus-per-task`; defaults to `1`. |
 | `nersc.slurm/gpus` | `#SBATCH --gpus`; mutually exclusive with `gpus-per-node`. |
 | `nersc.slurm/gpus-per-node` | `#SBATCH --gpus-per-node`; mutually exclusive with `gpus`. |
+| `nersc.slurm/gpus-per-task` | `srun --gpus-per-task`; requires `nersc.slurm/launcher: "srun"`. |
+| `nersc.slurm/launcher` | Rank launcher for the container command. Use `srun` for rank-launched pods; defaults to `none`. |
 | `nersc.slurm/mem` | `#SBATCH --mem`; defaults to `4GB`. |
 | `nersc.slurm/time` | `#SBATCH --time`; defaults to `00:30:00`. |
 | `nersc.slurm/partition` | `#SBATCH --partition`; defaults to `regular`. |
@@ -141,6 +165,39 @@ Supported Slurm annotations:
 | `nersc.slurm/account` | `#SBATCH --account`; omitted by default. `nersc.sf/project` is still sent to the Superfacility API request. |
 
 Invalid annotation values fail pod submission before the Slurm job is created.
+
+---
+
+## Sidecar Containers
+
+Multi-container pods run as one Slurm job and one `podman-hpc pod` on the allocated compute node. The main container is the first container by default; set `nersc.vk/mainContainer` to choose a different one. Other containers are sidecars, started before the main container and cleaned up when the main container exits.
+
+Do not set `nersc.slurm/launcher: "srun"` for sidecar pods. The rank launcher is for replicated single-container workloads, not supporting services.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: compute-with-sidecar
+  annotations:
+    nersc.sf/project: "m1234"
+    nersc.sf/tokenSecretName: "sf-api-token"
+    nersc.vk/mainContainer: "worker"
+    nersc.slurm/nodes: "1"
+    nersc.slurm/time: "00:30:00"
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: perlmutter-vk
+  containers:
+  - name: sidecar
+    image: registry.example.com/cache-sidecar:latest
+    command: ["bash", "-lc"]
+    args: ["python -m http.server 9000 --directory /scratch/cache"]
+  - name: worker
+    image: registry.example.com/worker:latest
+    command: ["bash", "-lc"]
+    args: ["curl -fsS http://127.0.0.1:9000/input.dat >/tmp/input.dat && python worker.py"]
+```
 
 ---
 
@@ -166,6 +223,7 @@ spec:
         app: hpc-stateful
       annotations:
         nersc.sf/project: "m1234"
+        nersc.sf/tokenSecretName: "sf-api-token"
         nersc.sf/inputSource: "globus://endpoint-id/path/to/data"
         nersc.sf/outputDest: "globus://endpoint-id/path/to/output"
         nersc.sf/stageOut: "true"
@@ -197,6 +255,7 @@ Add pod annotations to opt into Globus stage-in/out:
 ```yaml
 metadata:
   annotations:
+    nersc.sf/tokenSecretName: "sf-api-token"
     nersc.sf/inputSource: "globus://endpoint-id/path/to/input"
     nersc.sf/outputDest: "globus://endpoint-id/path/to/output"
     nersc.sf/stageOut: "true"
@@ -210,12 +269,14 @@ VK will:
 
 Globus URIs use the form `globus://<endpoint>/<absolute/path>`. The endpoint can be a Globus UUID or a NERSC shortcut supported by the Superfacility API, such as `dtn`, `hpss`, or `perlmutter`.
 
-The Superfacility API token must come from a client with the optional Globus capability enabled. If staging annotations are present but Globus is not enabled for the client, stage-in fails before compute submission or stage-out marks the pod failed with the transfer error.
+The workload's Superfacility API token must come from a client with the optional Globus capability enabled. If staging annotations are present but Globus is not enabled for that token, stage-in fails before compute submission or stage-out marks the pod failed with the transfer error.
 
 ### Staging annotations
 
 | Annotation | Required | Description |
 | --- | --- | --- |
+| `nersc.sf/tokenSecretName` | Yes | Kubernetes Secret in the workload namespace containing the Superfacility API token for this pod. |
+| `nersc.sf/tokenSecretKey` | No | Secret data key for the token; defaults to `token`. |
 | `nersc.sf/inputSource` | No | Globus source URI to stage into Perlmutter scratch before submitting the Slurm job. |
 | `nersc.sf/outputDest` | Required when `stageOut` is `true` | Globus destination URI for output staging after successful job completion. |
 | `nersc.sf/stageOut` | No | Set to `true` to enable output staging. |
@@ -232,6 +293,7 @@ Current staging annotations are read from the pod template. PVCs are still suppo
 
 See the [`examples/`](examples/) directory for:
 
+- `sf-api-token-secret.yaml` — per-workload Superfacility token Secret
 - `pod-simple.yaml` — basic pod
 - `pod-multi.yaml` — multi-container pod
 - `pod-pvc.yaml` — PVC with data staging

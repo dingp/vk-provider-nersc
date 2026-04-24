@@ -13,6 +13,8 @@ spec:
       labels:
         app: hpc-stateful
       annotations:
+        nersc.sf/project: "m1234"
+        nersc.sf/tokenSecretName: "sf-api-token"
         nersc.sf/inputSource: "globus://endpoint-id/path/to/data"
         nersc.sf/inputVolume: "data"
     spec:

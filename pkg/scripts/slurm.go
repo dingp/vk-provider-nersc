@@ -10,18 +10,25 @@ import (
 )
 
 const (
+	annotationMainContainer = "nersc.vk/mainContainer"
+
 	annotationNodes        = "nersc.slurm/nodes"
 	annotationNTasks       = "nersc.slurm/ntasks"
 	annotationTasksPerNode = "nersc.slurm/tasks-per-node"
 	annotationCPUsPerTask  = "nersc.slurm/cpus-per-task"
 	annotationGPUs         = "nersc.slurm/gpus"
 	annotationGPUsPerNode  = "nersc.slurm/gpus-per-node"
+	annotationGPUsPerTask  = "nersc.slurm/gpus-per-task"
+	annotationLauncher     = "nersc.slurm/launcher"
 	annotationMem          = "nersc.slurm/mem"
 	annotationTime         = "nersc.slurm/time"
 	annotationPartition    = "nersc.slurm/partition"
 	annotationQOS          = "nersc.slurm/qos"
 	annotationConstraint   = "nersc.slurm/constraint"
 	annotationAccount      = "nersc.slurm/account"
+
+	launcherNone = "none"
+	launcherSrun = "srun"
 )
 
 var (
@@ -38,6 +45,8 @@ type slurmOptions struct {
 	CPUsPerTask  int
 	GPUs         int
 	GPUsPerNode  int
+	GPUsPerTask  int
+	Launcher     string
 	Mem          string
 	Time         string
 	Partition    string
@@ -54,7 +63,7 @@ func PodToSlurmPodmanWithVolumes(pod *corev1.Pod, volPaths map[string]string) (s
 
 	c := pod.Spec.Containers[0]
 	setup := buildVolumeSetup(c.VolumeMounts, volPaths)
-	runCommand := containerRunCommand(c, volPaths, false)
+	runCommand := renderLaunchCommand(opts, containerRunCommand(c, volPaths, false))
 
 	return fmt.Sprintf(`#!/bin/bash
 %s
@@ -62,12 +71,19 @@ set -euo pipefail
 
 module load podman-hpc
 %s
-srun %s
+%s
 `, renderSlurmDirectives(opts), setup, runCommand), nil
 }
 
 func PodToSlurmPodmanMultiWithVolumes(pod *corev1.Pod, volPaths map[string]string) (string, error) {
 	opts, err := slurmOptionsFromPod(pod)
+	if err != nil {
+		return "", err
+	}
+	if opts.Launcher != launcherNone {
+		return "", fmt.Errorf("%s=%s is only supported for single-container pods", annotationLauncher, opts.Launcher)
+	}
+	mainContainer, sidecars, err := splitMainAndSidecarContainers(pod)
 	if err != nil {
 		return "", err
 	}
@@ -80,21 +96,17 @@ set -euo pipefail
 module load podman-hpc
 %s
 POD_ID=$(podman-hpc pod create --name %s)
-pids=()
+cleanup() {
+  podman-hpc pod stop "$POD_ID" >/dev/null 2>&1 || true
+  podman-hpc pod rm -f "$POD_ID" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 `, renderSlurmDirectives(opts), buildVolumeSetupForPod(pod, volPaths), shellQuote(pod.Name+"-pod"))
 
-	for _, c := range pod.Spec.Containers {
+	for _, c := range sidecars {
 		fmt.Fprintf(sb, "%s &\n", containerRunCommand(c, volPaths, true))
-		fmt.Fprintln(sb, `pids+=("$!")`)
 	}
-	fmt.Fprint(sb, `status=0
-for pid in "${pids[@]}"; do
-  if ! wait "$pid"; then
-    status=1
-  fi
-done
-exit "$status"
-`)
+	fmt.Fprintf(sb, "%s\n", containerRunCommand(mainContainer, volPaths, true))
 	return sb.String(), nil
 }
 
@@ -104,6 +116,7 @@ func slurmOptionsFromPod(pod *corev1.Pod) (slurmOptions, error) {
 		Output:      pod.Name + ".out",
 		Nodes:       1,
 		CPUsPerTask: 1,
+		Launcher:    launcherNone,
 		Mem:         "4GB",
 		Time:        "00:30:00",
 		Partition:   "regular",
@@ -128,8 +141,23 @@ func slurmOptionsFromPod(pod *corev1.Pod) (slurmOptions, error) {
 	if opts.GPUsPerNode, err = positiveIntAnnotation(pod, annotationGPUsPerNode, 0); err != nil {
 		return slurmOptions{}, err
 	}
+	if opts.GPUsPerTask, err = positiveIntAnnotation(pod, annotationGPUsPerTask, 0); err != nil {
+		return slurmOptions{}, err
+	}
 	if opts.GPUs > 0 && opts.GPUsPerNode > 0 {
 		return slurmOptions{}, fmt.Errorf("%s and %s cannot both be set", annotationGPUs, annotationGPUsPerNode)
+	}
+	launcher := strings.ToLower(annotationValue(pod, annotationLauncher))
+	switch launcher {
+	case "", launcherNone:
+		opts.Launcher = launcherNone
+	case launcherSrun:
+		opts.Launcher = launcherSrun
+	default:
+		return slurmOptions{}, fmt.Errorf("%s must be one of %q or %q", annotationLauncher, launcherNone, launcherSrun)
+	}
+	if opts.GPUsPerTask > 0 && opts.Launcher != launcherSrun {
+		return slurmOptions{}, fmt.Errorf("%s requires %s=%s", annotationGPUsPerTask, annotationLauncher, launcherSrun)
 	}
 	if opts.Mem, err = safeStringAnnotation(pod, annotationMem, opts.Mem, safeSlurmValuePattern); err != nil {
 		return slurmOptions{}, err
@@ -186,6 +214,58 @@ func renderSlurmDirectives(opts slurmOptions) string {
 	}
 	lines = append(lines, fmt.Sprintf("#SBATCH --output=%s", opts.Output))
 	return strings.Join(lines, "\n")
+}
+
+func renderLaunchCommand(opts slurmOptions, command string) string {
+	if opts.Launcher != launcherSrun {
+		return command
+	}
+
+	args := []string{launcherSrun}
+	if opts.NTasks > 0 {
+		args = append(args, fmt.Sprintf("--ntasks=%d", opts.NTasks))
+	}
+	if opts.TasksPerNode > 0 {
+		args = append(args, fmt.Sprintf("--ntasks-per-node=%d", opts.TasksPerNode))
+	}
+	if opts.CPUsPerTask > 0 {
+		args = append(args, fmt.Sprintf("--cpus-per-task=%d", opts.CPUsPerTask))
+	}
+	if opts.GPUsPerTask > 0 {
+		args = append(args, fmt.Sprintf("--gpus-per-task=%d", opts.GPUsPerTask))
+	}
+	args = append(args, command)
+	return strings.Join(args, " ")
+}
+
+func splitMainAndSidecarContainers(pod *corev1.Pod) (corev1.Container, []corev1.Container, error) {
+	if pod == nil || len(pod.Spec.Containers) == 0 {
+		return corev1.Container{}, nil, fmt.Errorf("pod must have at least one container")
+	}
+
+	mainName := annotationValue(pod, annotationMainContainer)
+	mainIndex := 0
+	if mainName != "" {
+		mainIndex = -1
+		for i, c := range pod.Spec.Containers {
+			if c.Name == mainName {
+				mainIndex = i
+				break
+			}
+		}
+		if mainIndex == -1 {
+			return corev1.Container{}, nil, fmt.Errorf("%s references unknown container %q", annotationMainContainer, mainName)
+		}
+	}
+
+	sidecars := make([]corev1.Container, 0, len(pod.Spec.Containers)-1)
+	for i, c := range pod.Spec.Containers {
+		if i == mainIndex {
+			continue
+		}
+		sidecars = append(sidecars, c)
+	}
+	return pod.Spec.Containers[mainIndex], sidecars, nil
 }
 
 func positiveIntAnnotation(pod *corev1.Pod, key string, fallback int) (int, error) {

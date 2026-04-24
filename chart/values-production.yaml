@@ -8,7 +8,6 @@ image:
   pullPolicy: IfNotPresent
 
 sfApiEndpoint: "https://api.nersc.gov/api/v1.2"
-sfApiToken: "" # Will be stored in secret
 
 vkNodeName: "perlmutter-vk"
 

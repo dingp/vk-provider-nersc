@@ -8,7 +8,6 @@ image:
   pullPolicy: IfNotPresent
 
 sfApiEndpoint: "https://api.nersc.gov/api/v1.2"
-sfApiToken: "" # Will be stored in secret
 
 vkNodeName: "perlmutter-vk"
 
@@ -33,6 +32,8 @@ statefulset:
   name: hpc-stateful
   replicas: 2
   project: m1234
+  tokenSecretName: sf-api-token
+  tokenSecretKey: token
   inputSource: "globus://endpoint-id/path/to/data"
   inputVolume: data
   outputDest: "globus://endpoint-id/path/to/output"

@@ -11,7 +11,6 @@ releases:
     chart: ./chart
     values:
       - chart/values-dev.yaml
-      - sfApiToken: "{{ requiredEnv 'SF_API_TOKEN_DEV' }}"
     installed: true
 
   # Production VK provider
@@ -20,5 +19,4 @@ releases:
     chart: ./chart
     values:
       - chart/values-production.yaml
-      - sfApiToken: "{{ requiredEnv 'SF_API_TOKEN_PROD' }}"
     installed: true

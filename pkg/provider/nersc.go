@@ -22,14 +22,17 @@ import (
 )
 
 type NerscProvider struct {
-	sfClient             jobClient
+	sfClientFactory      jobClientFactory
+	tokenResolver        TokenResolver
 	nodeName             string
 	transferPollInterval time.Duration
 	transferTimeout      time.Duration
 	mu                   sync.RWMutex
-	podMap               map[string]string // podKey -> jobID
+	podMap               map[string]podJobState // podKey -> job state
 	stagingMap           map[string]*podStagingState
 }
+
+type jobClientFactory func(token string) jobClient
 
 type jobClient interface {
 	SubmitJob(context.Context, superfacility.JobSubmissionRequest) (string, error)
@@ -40,18 +43,29 @@ type jobClient interface {
 	CheckGlobusTransfer(context.Context, string) (superfacility.GlobusTransferResult, error)
 }
 
+type TokenResolver interface {
+	TokenForPod(context.Context, *corev1.Pod) (string, error)
+}
+
 const (
 	defaultTransferPollInterval = 15 * time.Second
 	defaultTransferTimeout      = 30 * time.Minute
 
-	annotationInputSource    = "nersc.sf/inputSource"
-	annotationOutputDest     = "nersc.sf/outputDest"
-	annotationStageOut       = "nersc.sf/stageOut"
-	annotationStageVolume    = "nersc.sf/stageVolume"
-	annotationInputVolume    = "nersc.sf/inputVolume"
-	annotationOutputVolume   = "nersc.sf/outputVolume"
-	annotationGlobusUsername = "nersc.sf/globusUsername"
+	annotationTokenSecretName = "nersc.sf/tokenSecretName"
+	annotationTokenSecretKey  = "nersc.sf/tokenSecretKey"
+	annotationInputSource     = "nersc.sf/inputSource"
+	annotationOutputDest      = "nersc.sf/outputDest"
+	annotationStageOut        = "nersc.sf/stageOut"
+	annotationStageVolume     = "nersc.sf/stageVolume"
+	annotationInputVolume     = "nersc.sf/inputVolume"
+	annotationOutputVolume    = "nersc.sf/outputVolume"
+	annotationGlobusUsername  = "nersc.sf/globusUsername"
 )
+
+type podJobState struct {
+	jobID string
+	token string
+}
 
 type podStagingState struct {
 	inputTransferID  string
@@ -80,9 +94,8 @@ type globusLocation struct {
 	Path     string
 }
 
-func NewNerscProvider(endpoint, token, nodeName string) (*NerscProvider, error) {
+func NewNerscProvider(endpoint, nodeName string, tokenResolver TokenResolver) (*NerscProvider, error) {
 	endpoint = strings.TrimSpace(endpoint)
-	token = strings.TrimSpace(token)
 	nodeName = strings.TrimSpace(nodeName)
 	if endpoint == "" {
 		return nil, fmt.Errorf("SF_API_ENDPOINT is required")
@@ -94,20 +107,20 @@ func NewNerscProvider(endpoint, token, nodeName string) (*NerscProvider, error) 
 	if endpointURL.Scheme == "" || endpointURL.Host == "" {
 		return nil, fmt.Errorf("invalid SF_API_ENDPOINT: must include scheme and host")
 	}
-	if token == "" {
-		return nil, fmt.Errorf("SF_API_TOKEN is required")
+	if tokenResolver == nil {
+		return nil, fmt.Errorf("Superfacility token resolver is required")
 	}
 	if nodeName == "" {
 		nodeName = "perlmutter-vk"
 	}
 
-	client := superfacility.New(endpoint, token)
 	return &NerscProvider{
-		sfClient:             client,
+		sfClientFactory:      func(token string) jobClient { return superfacility.New(endpoint, token) },
+		tokenResolver:        tokenResolver,
 		nodeName:             nodeName,
 		transferPollInterval: defaultTransferPollInterval,
 		transferTimeout:      defaultTransferTimeout,
-		podMap:               make(map[string]string),
+		podMap:               make(map[string]podJobState),
 		stagingMap:           make(map[string]*podStagingState),
 	}, nil
 }
@@ -124,6 +137,15 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	if jobID, exists := p.jobIDForPodKey(key); exists {
 		log.Printf("Pod %s is already tracked as job %s", key, jobID)
 		return nil
+	}
+
+	token, err := p.tokenForPod(ctx, pod)
+	if err != nil {
+		return fmt.Errorf("resolve Superfacility token for pod %s: %w", key, err)
+	}
+	client, err := p.clientForToken(token)
+	if err != nil {
+		return fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 	}
 
 	user := os.Getenv("USER")
@@ -151,7 +173,7 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 		return err
 	}
 	if staging != nil && staging.inputSource != nil {
-		transferID, err := p.startAndWaitForTransfer(ctx, superfacility.GlobusTransferRequest{
+		transferID, err := p.startAndWaitForTransfer(ctx, client, superfacility.GlobusTransferRequest{
 			SourceUUID: staging.inputSource.Endpoint,
 			TargetUUID: "perlmutter",
 			SourceDir:  staging.inputSource.Path,
@@ -175,7 +197,7 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 		return fmt.Errorf("generate slurm script for pod %s: %w", key, err)
 	}
 
-	jobID, err := p.sfClient.SubmitJob(ctx, superfacility.JobSubmissionRequest{
+	jobID, err := client.SubmitJob(ctx, superfacility.JobSubmissionRequest{
 		Script:  script,
 		System:  "perlmutter",
 		Queue:   "regular",
@@ -186,15 +208,15 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	}
 
 	p.mu.Lock()
-	if existingJobID, exists := p.podMap[key]; exists {
+	if existing, exists := p.podMap[key]; exists {
 		p.mu.Unlock()
-		if cancelErr := p.sfClient.CancelJob(ctx, jobID); cancelErr != nil {
-			return fmt.Errorf("pod %s was concurrently submitted as job %s; failed to cancel duplicate job %s: %w", key, existingJobID, jobID, cancelErr)
+		if cancelErr := client.CancelJob(ctx, jobID); cancelErr != nil {
+			return fmt.Errorf("pod %s was concurrently submitted as job %s; failed to cancel duplicate job %s: %w", key, existing.jobID, jobID, cancelErr)
 		}
-		log.Printf("Pod %s was concurrently submitted as job %s; cancelled duplicate job %s", key, existingJobID, jobID)
+		log.Printf("Pod %s was concurrently submitted as job %s; cancelled duplicate job %s", key, existing.jobID, jobID)
 		return nil
 	}
-	p.podMap[key] = jobID
+	p.podMap[key] = podJobState{jobID: jobID, token: token}
 	if p.stagingMap == nil {
 		p.stagingMap = make(map[string]*podStagingState)
 	}
@@ -218,21 +240,25 @@ func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 	}
 
 	key := podKey(pod)
-	if jobID, exists := p.jobIDForPodKey(key); exists {
-		err := p.sfClient.CancelJob(ctx, jobID)
+	if state, exists := p.jobStateForPodKey(key); exists {
+		client, err := p.clientForToken(state.token)
 		if err != nil {
-			log.Printf("Failed to cancel job %s for pod %s: %v", jobID, key, err)
+			return fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
+		}
+		err = client.CancelJob(ctx, state.jobID)
+		if err != nil {
+			log.Printf("Failed to cancel job %s for pod %s: %v", state.jobID, key, err)
 			return err
 		}
 
 		p.mu.Lock()
-		if p.podMap[key] == jobID {
+		if p.podMap[key].jobID == state.jobID {
 			delete(p.podMap, key)
 			delete(p.stagingMap, key)
 		}
 		p.mu.Unlock()
 
-		log.Printf("Cancelled job %s for pod %s", jobID, key)
+		log.Printf("Cancelled job %s for pod %s", state.jobID, key)
 	} else {
 		p.mu.Lock()
 		delete(p.stagingMap, key)
@@ -241,20 +267,51 @@ func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 	return nil
 }
 
-func (p *NerscProvider) jobIDForPodKey(key string) (string, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	jobID, exists := p.podMap[key]
-	return jobID, exists
+func (p *NerscProvider) tokenForPod(ctx context.Context, pod *corev1.Pod) (string, error) {
+	if p.tokenResolver == nil {
+		return "", fmt.Errorf("Superfacility token resolver is not configured")
+	}
+	token, err := p.tokenResolver.TokenForPod(ctx, pod)
+	if err != nil {
+		return "", err
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", fmt.Errorf("Superfacility token is empty")
+	}
+	return token, nil
 }
 
-func (p *NerscProvider) podJobsSnapshot() map[string]string {
+func (p *NerscProvider) clientForToken(token string) (jobClient, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, fmt.Errorf("Superfacility token is empty")
+	}
+	if p.sfClientFactory == nil {
+		return nil, fmt.Errorf("Superfacility client factory is not configured")
+	}
+	return p.sfClientFactory(token), nil
+}
+
+func (p *NerscProvider) jobIDForPodKey(key string) (string, bool) {
+	state, exists := p.jobStateForPodKey(key)
+	return state.jobID, exists
+}
+
+func (p *NerscProvider) jobStateForPodKey(key string) (podJobState, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	state, exists := p.podMap[key]
+	return state, exists
+}
+
+func (p *NerscProvider) podJobsSnapshot() map[string]podJobState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	snapshot := make(map[string]string, len(p.podMap))
-	for key, jobID := range p.podMap {
-		snapshot[key] = jobID
+	snapshot := make(map[string]podJobState, len(p.podMap))
+	for key, state := range p.podMap {
+		snapshot[key] = state
 	}
 	return snapshot
 }
@@ -267,17 +324,21 @@ func (p *NerscProvider) stagingForPodKey(key string) *podStagingState {
 
 func (p *NerscProvider) GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
 	key := fmt.Sprintf("%s/%s", namespace, name)
-	jobID, exists := p.jobIDForPodKey(key)
+	state, exists := p.jobStateForPodKey(key)
 	if !exists {
 		return nil, fmt.Errorf("pod %s not found", key)
 	}
+	client, err := p.clientForToken(state.token)
+	if err != nil {
+		return nil, fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
+	}
 
-	status, err := p.sfClient.GetJobStatus(ctx, jobID)
+	status, err := client.GetJobStatus(ctx, state.jobID)
 	if err != nil {
 		return nil, err
 	}
 
-	podStatus := p.podStatusForJob(ctx, key, mapJobStatusToPodPhase(status))
+	podStatus := p.podStatusForJob(ctx, key, state.token, mapJobStatusToPodPhase(status))
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -308,16 +369,21 @@ func (p *NerscProvider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 	sort.Strings(keys)
 
 	for _, key := range keys {
-		jobID := podJobs[key]
+		state := podJobs[key]
 		parts := strings.Split(key, "/")
 		if len(parts) != 2 {
 			continue
 		}
 		namespace, name := parts[0], parts[1]
 
-		status, err := p.sfClient.GetJobStatus(ctx, jobID)
+		client, err := p.clientForToken(state.token)
 		if err != nil {
-			log.Printf("Failed to get status for job %s: %v", jobID, err)
+			log.Printf("Failed to create Superfacility client for pod %s: %v", key, err)
+			continue
+		}
+		status, err := client.GetJobStatus(ctx, state.jobID)
+		if err != nil {
+			log.Printf("Failed to get status for job %s: %v", state.jobID, err)
 			continue
 		}
 
@@ -326,14 +392,14 @@ func (p *NerscProvider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 				Name:      name,
 				Namespace: namespace,
 			},
-			Status: p.podStatusForJob(ctx, key, mapJobStatusToPodPhase(status)),
+			Status: p.podStatusForJob(ctx, key, state.token, mapJobStatusToPodPhase(status)),
 		}
 		pods = append(pods, pod)
 	}
 	return pods, nil
 }
 
-func (p *NerscProvider) podStatusForJob(ctx context.Context, key string, jobPhase corev1.PodPhase) corev1.PodStatus {
+func (p *NerscProvider) podStatusForJob(ctx context.Context, key, token string, jobPhase corev1.PodPhase) corev1.PodStatus {
 	status := corev1.PodStatus{Phase: jobPhase}
 	if jobPhase != corev1.PodSucceeded {
 		return status
@@ -344,17 +410,21 @@ func (p *NerscProvider) podStatusForJob(ctx context.Context, key string, jobPhas
 		return status
 	}
 
-	return p.reconcileStageOut(ctx, key)
+	return p.reconcileStageOut(ctx, key, token)
 }
 
 func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, container string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
 	key := fmt.Sprintf("%s/%s", namespace, name)
-	jobID, exists := p.jobIDForPodKey(key)
+	state, exists := p.jobStateForPodKey(key)
 	if !exists {
 		return nil, fmt.Errorf("pod %s not found", key)
 	}
+	client, err := p.clientForToken(state.token)
+	if err != nil {
+		return nil, fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
+	}
 
-	logs, err := p.sfClient.FetchJobLogs(ctx, jobID)
+	logs, err := client.FetchJobLogs(ctx, state.jobID)
 	if err != nil {
 		return nil, err
 	}

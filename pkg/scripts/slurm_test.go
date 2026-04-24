@@ -52,6 +52,9 @@ func TestSingleContainerScriptQuotesArgumentsAndCreatesVolumeDirs(t *testing.T) 
 	if strings.Contains(script, "srun podman-hpc run") {
 		t.Fatalf("script should not implicitly wrap podman-hpc with srun:\n%s", script)
 	}
+	if strings.Contains(script, "module load podman-hpc") {
+		t.Fatalf("script should not load a podman-hpc module:\n%s", script)
+	}
 }
 
 func TestMultiContainerScriptRunsMainContainerAndCleansUpSidecars(t *testing.T) {
@@ -91,6 +94,9 @@ func TestMultiContainerScriptRunsMainContainerAndCleansUpSidecars(t *testing.T) 
 	workerIndex := strings.Index(script, "'image-worker'")
 	if sidecarIndex == -1 || workerIndex == -1 || sidecarIndex > workerIndex {
 		t.Fatalf("sidecar should start before main container:\n%s", script)
+	}
+	if strings.Contains(script, "module load podman-hpc") {
+		t.Fatalf("script should not load a podman-hpc module:\n%s", script)
 	}
 }
 

@@ -69,7 +69,6 @@ func PodToSlurmPodmanWithVolumes(pod *corev1.Pod, volPaths map[string]string) (s
 %s
 set -euo pipefail
 
-module load podman-hpc
 %s
 %s
 `, renderSlurmDirectives(opts), setup, runCommand), nil
@@ -93,7 +92,6 @@ func PodToSlurmPodmanMultiWithVolumes(pod *corev1.Pod, volPaths map[string]strin
 %s
 set -euo pipefail
 
-module load podman-hpc
 %s
 POD_ID=$(podman-hpc pod create --name %s)
 cleanup() {

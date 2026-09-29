@@ -1,4 +1,4 @@
-# CPU validation examples used by the Dell pilot
+# CPU validation examples
 
 These four manifests preserve the workload shapes and payloads exercised on
 Perlmutter on 2026-09-29. Names and labels were made reusable, and the unused
@@ -14,7 +14,7 @@ selector/toleration, and Slurm limits remain in the templates.
 | `cancel-pod.json` / `cancel` | Marker then 240-second sleep; delete while running and confirm cancellation | 59065194, nid006251, CANCELLED |
 
 The files are Kubernetes JSON manifests (`kubectl` accepts JSON and YAML). They
-use the pilot's `nstaff/debug` values; **render a new unique name and an account/QOS
+contain account/QOS placeholders; **render a new unique name and an account/QOS
 you are authorized to use**. Applying a template submits real billable work.
 Run one case at a time and retain a submission ledger. The original session cap
 was six submissions including retries, one outstanding job, one node/job, and
@@ -37,17 +37,18 @@ podman-hpc images
 ```
 
 Confirm its migrated read-only copy is available. Image preparation is not a
-compute test. If using the SFAPI helper through the Dell egress path, use
+compute test. If using the SFAPI helper through the provider egress path, use
 `sfapi-probe prepare-image` as described in the root README.
 
 ## 2. Render and submit a successful case
 
 `render.py` uses only the Python standard library, prints a manifest, and makes no
-network requests. Choose a fresh name for every submission, including retries:
+network requests. Set `SLURM_ACCOUNT` and `SLURM_QOS` to values you are authorized
+to use, then choose a fresh name for every submission, including retries:
 
 ```bash
-python3 examples/dell-lab-cpu/render.py pod \
-  --name my-cpu-pod-20260929a --account nstaff --qos debug > /tmp/my-cpu-pod.json
+python3 examples/cpu-validation/render.py pod \
+  --name my-cpu-pod-20260929a --account "$SLURM_ACCOUNT" --qos "$SLURM_QOS" > /tmp/my-cpu-pod.json
 kubectl -n nersc-vk-tests create --dry-run=server -f /tmp/my-cpu-pod.json
 kubectl -n nersc-vk-tests create -f /tmp/my-cpu-pod.json
 kubectl -n nersc-vk-tests get pod my-cpu-pod-20260929a -o wide
@@ -100,8 +101,8 @@ because the job started quickly; task-completion races have regression tests.
 ## Change execution controls
 
 ```bash
-python3 examples/dell-lab-cpu/render.py job \
-  --name my-cpu-job-20260929b --account amsc013 --qos express_amsc \
+python3 examples/cpu-validation/render.py job \
+  --name my-cpu-job-20260929b --account "$SLURM_ACCOUNT" --qos "$SLURM_QOS" \
   --nodes 1 --walltime 00:05:00 > /tmp/my-cpu-job.json
 ```
 
@@ -118,9 +119,8 @@ python3 examples/dell-lab-cpu/render.py job \
 
 For Jobs, execution annotations belong under `spec.template.metadata.annotations`.
 Keep limits within the agreed allocation budget. Node type `gpu` additionally
-requires GPU allocation annotations and Podman-HPC GPU runtime activation, which
-the current provider generator has not implemented/qualified. Changing that field
-alone does not make these CPU examples GPU-ready.
+requires GPU allocation annotations. The provider enables Podman-HPC `--gpu`
+when GPUs are explicitly requested. See the [GPU validation example](../gpu-validation/).
 
 `--namespace`, `--node-name`, `--secret`, and `--image` adapt installation-specific
 values. Image overrides must use a digest. Existing Slurm jobs are not changed by
@@ -134,6 +134,3 @@ are terminal, then remove only the test workloads and their credential Secret.
 Retain remote output files by default; Slurm stdout is `<workdir>/<pod-name>.out`
 and is not relocated by a scratch annotation. Leave the singleton provider idle.
 Never restart it with outstanding jobs: its mappings remain in memory.
-
-See the [deployment record](../../docs/dell-lab-deployment.md) for source/image
-provenance, TLS routing, test outcomes, and known limitations.

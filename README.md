@@ -17,8 +17,10 @@ See [limitations](#operating-limits) before deploying controllers that create wo
 
 The Dell pilot passed CPU Pod/Job execution, ordinary Kubernetes logs, deliberate
 failure, and running-job cancellation on 2026-09-29. See the
-[validation record](docs/dell-lab-deployment.md#compute-validation-results). GPU
-execution, data staging, and StatefulSets were not qualified by that pilot.
+[validation record](docs/dell-lab-deployment.md#compute-validation-results). Data staging and StatefulSets were not qualified by that pilot.
+A subsequent [four-GPU smoke Job](examples/gpu-validation/) passed on all four
+A100 80 GB GPUs of one Perlmutter node on 2026-09-29, including normal
+`kubectl logs` and independent Slurm accounting.
 
 ## Prerequisites
 
@@ -203,7 +205,7 @@ job has reached a confirmed terminal state, including during cancellation.
 
 ## First CPU job
 
-Use the [tested CPU validation examples](examples/dell-lab-cpu/) for successful
+Use the [tested CPU validation examples](examples/cpu-validation/) for successful
 Pod/Job, deliberate failure, and cancellation cases. Their renderer lets you set
 account, QOS, node count, walltime, namespace, and unique workload names.
 
@@ -266,10 +268,12 @@ inconclusive until all remote work is reconciled. Never repeat an ambiguous crea
   does not mount its data on Perlmutter automatically; stage data explicitly.
   Container `env`, Secret/ConfigMap volume contents, and Kubernetes image pull
   secrets are not forwarded to Podman-HPC by the current script generator.
-- GPU Slurm annotations allocate resources, but the generator does not currently
-  add Podman-HPC GPU activation or forward rank/GPU environment variables.
-  GPU execution requires additional implementation and validation. Do not assume
-  local `nvidia.com/gpu` resources or Dell DRA claims apply to the virtual Node.
+- Explicit GPU counts enable Podman-HPC `--gpu` and forward `CUDA_VISIBLE_DEVICES`.
+  The `srun` launcher also forwards `SLURM_JOB_ID`, `SLURM_PROCID`, `SLURM_LOCALID`,
+  and `SLURM_NTASKS`; other container environment variables remain unsupported.
+  See the [four-GPU example](examples/gpu-validation/). Local Kubernetes GPU
+  resources and DRA claims do not express remote Slurm allocations. Multi-node
+  GPU communication and per-container GPU isolation are not qualified.
 - StatefulSets can create replacement work and provide scratch naming only;
   service networking and general persistent Kubernetes storage semantics do not
   carry over. Keep the optional chart example disabled during qualification.

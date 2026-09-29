@@ -238,7 +238,7 @@ func TestSlurmLauncherRendersSrunExplicitly(t *testing.T) {
 		"#SBATCH --ntasks-per-node=4",
 		"#SBATCH --cpus-per-task=8",
 		"#SBATCH --gpus-per-node=4",
-		"srun --ntasks=8 --ntasks-per-node=4 --cpus-per-task=8 --gpus-per-task=1 podman-hpc run --rm 'image' 'bash' '-lc' 'echo $SLURM_PROCID'",
+		"srun --ntasks=8 --ntasks-per-node=4 --cpus-per-task=8 --gpus-per-task=1 podman-hpc run --rm --gpu --env CUDA_VISIBLE_DEVICES --env SLURM_JOB_ID --env SLURM_PROCID --env SLURM_LOCALID --env SLURM_NTASKS 'image' 'bash' '-lc' 'echo $SLURM_PROCID'",
 	}
 	for _, fragment := range wantFragments {
 		if !strings.Contains(script, fragment) {
@@ -368,5 +368,47 @@ func TestMultiContainerScriptRejectsUnknownMainContainer(t *testing.T) {
 	_, err := PodToSlurmPodmanMultiWithVolumes(pod, nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown container") {
 		t.Fatalf("error = %v, want main container validation error", err)
+	}
+}
+
+func TestGPUActivationRequiresGPURequest(t *testing.T) {
+	for _, field := range []string{"", annotationConstraint, annotationGPUs, annotationGPUsPerNode, annotationGPUsPerTask} {
+		t.Run(field, func(t *testing.T) {
+			annotations := map[string]string{}
+			if field == annotationConstraint {
+				annotations[field] = "gpu"
+			} else if field != "" {
+				annotations[field] = "1"
+			}
+			if field == annotationGPUsPerTask {
+				annotations[annotationLauncher] = launcherSrun
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gpu-test", Annotations: annotations}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "image"}}}}
+			script, err := PodToSlurmPodmanWithVolumes(pod, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := field != "" && field != annotationConstraint
+			if strings.Contains(script, "--gpu --env CUDA_VISIBLE_DEVICES") != want {
+				t.Fatalf("unexpected GPU activation: %s", script)
+			}
+			if strings.Contains(script, "--env-host") {
+				t.Fatal("host environment must not be forwarded")
+			}
+			if field != annotationGPUsPerTask {
+				pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "sidecar", Image: "sidecar"})
+				script, err = PodToSlurmPodmanMultiWithVolumes(pod, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				count := 0
+				if want {
+					count = 2
+				}
+				if strings.Count(script, "--gpu --env CUDA_VISIBLE_DEVICES") != count {
+					t.Fatalf("unexpected multi-container GPU activation: %s", script)
+				}
+			}
+		})
 	}
 }

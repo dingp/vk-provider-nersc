@@ -25,7 +25,7 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: sfapi-probe check|job ID|task ID|cancel ID|preflight SCRATCH|prepare-image IMAGE")
+		return fmt.Errorf("usage: sfapi-probe check|job ID|task ID|cancel ID|preflight SCRATCH|gpu-preflight ACCOUNT QOS|prepare-image IMAGE")
 	}
 	var key struct {
 		ClientID string          `json:"client_id"`
@@ -67,6 +67,22 @@ func run() error {
 		return json.NewEncoder(os.Stdout).Encode(data)
 	}
 	switch os.Args[1] {
+	case "gpu-preflight":
+		if len(os.Args) != 4 {
+			return fmt.Errorf("gpu-preflight requires account and QOS")
+		}
+		for _, value := range os.Args[2:] {
+			if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(value) {
+				return fmt.Errorf("invalid account or QOS")
+			}
+		}
+		command := "set -eu; sbatch --test-only --account=" + os.Args[2] + " --qos=" + os.Args[3] + " --constraint=gpu --nodes=1 --ntasks=1 --cpus-per-task=2 --gpus-per-node=4 --time=00:05:00 --mem=4G --wrap=true"
+		result, err := client.RunCommand(ctx, "perlmutter", command)
+		if err != nil {
+			return fmt.Errorf("GPU preflight failed: %w", err)
+		}
+		fmt.Println(result)
+		return nil
 	case "check":
 		if err := get("/account"); err != nil {
 			return err

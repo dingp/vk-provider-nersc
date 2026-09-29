@@ -161,7 +161,7 @@ verify the exact portal timestamp before future sessions. The workload Secret an
 temporary combined key are removed after final reconciliation. Original user key
 files and remote output/image data are retained.
 
-The [reusable CPU examples](../examples/dell-lab-cpu/) include all four workload
+The [reusable CPU examples](../examples/cpu-validation/) include all four workload
 shapes and a renderer with account/QOS/node-count/walltime controls. Rendering all
 four with `amsc013/express_amsc` passed Kubernetes server dry-run. These are
 rendering checks; actual live jobs used `nstaff/debug`.
@@ -170,7 +170,7 @@ rendering checks; actual live jobs used `nstaff/debug`.
 
 The CPU pilot is limited to six total submissions, serial, one CPU node and five
 minutes per job. Record Pod UID, SFAPI task, resolved Slurm ID, compute NodeList,
-account, real exit code, logs, and terminal accounting. GPU validation is deferred.
+account, real exit code, logs, and terminal accounting. GPU validation was deferred during the CPU pilot and completed in the follow-up below.
 Do not interpret the synthetic Kubernetes capacity or Ready condition as proof of
 an available Slurm allocation. Credentials must outlive monitoring and cancellation.
 
@@ -180,3 +180,23 @@ remote scratch outputs unless explicitly cleaning them. Uninstall the release,
 delete the separately owned virtual Node/endpoint/TLS resources, restore the
 saved DaemonSet configuration, and confirm physical cluster health. If retaining
 the installation idle, retain its endpoint/certificate and track certificate expiry.
+
+## GPU follow-up (2026-09-29)
+
+The [neutral four-GPU example](../examples/gpu-validation/) passed on one
+Perlmutter GPU node. The provider now enables Podman-HPC `--gpu` for explicit
+GPU allocation annotations and forwards GPU visibility plus a fixed list of
+Slurm rank variables through `srun`.
+
+- One Kubernetes Job, one Pod, one node, four A100-SXM4-80GB GPUs, five-minute
+  walltime, `backoffLimit: 0`; the sixth compute submission overall.
+- CUDA driver API kernel result 42 on each GPU; ordinary `kubectl logs` passed.
+- Slurm COMPLETED, exit `0:0`, 14 seconds; Kubernetes Job Complete.
+- Requested project mapped to its GPU accounting association; requested QOS was
+  retained. Reusable examples deliberately require explicit account/QOS input.
+- Provider upgraded to Helm revision 4 while idle; installation checks passed.
+- This qualifies single-node CUDA execution only. Multi-node GPU communication,
+  GPU performance, and per-container GPU isolation remain unqualified.
+
+Detailed workload IDs, effective account/QOS, logs, image provenance, and cleanup
+are recorded in the operator workspace under `reports/vk-nersc/20260929-gpu/`.

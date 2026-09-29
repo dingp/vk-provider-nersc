@@ -13,8 +13,8 @@
       "nersc.slurm/mem": "1GB",
       "nersc.slurm/time": "00:05:00",
       "nersc.slurm/constraint": "cpu",
-      "nersc.slurm/account": "nstaff",
-      "nersc.slurm/qos": "debug"
+      "nersc.slurm/account": "REPLACE_WITH_ACCOUNT",
+      "nersc.slurm/qos": "REPLACE_WITH_QOS"
     },
     "name": "vk-example-failure"
   },
@@ -35,8 +35,8 @@
           "nersc.slurm/mem": "1GB",
           "nersc.slurm/time": "00:05:00",
           "nersc.slurm/constraint": "cpu",
-          "nersc.slurm/account": "nstaff",
-          "nersc.slurm/qos": "debug"
+          "nersc.slurm/account": "REPLACE_WITH_ACCOUNT",
+          "nersc.slurm/qos": "REPLACE_WITH_QOS"
         }
       },
       "spec": {

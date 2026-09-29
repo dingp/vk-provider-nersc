@@ -15,9 +15,10 @@ The provider implements submission, status, cancellation, and job log retrieval.
 It also implements optional file staging, sidecars, and StatefulSet scratch paths.
 See [limitations](#operating-limits) before deploying controllers that create work.
 
-The Dell pilot passed CPU Pod/Job execution, ordinary Kubernetes logs, deliberate
-failure, and running-job cancellation on 2026-09-29. See the
-[validation record](docs/dell-lab-deployment.md#compute-validation-results). Data staging and StatefulSets were not qualified by that pilot.
+Validation on 2026-09-29 covered CPU Pod/Job execution, ordinary Kubernetes logs,
+deliberate failure, and running-job cancellation. See the
+[CPU validation examples](examples/cpu-validation/). Data staging and StatefulSets
+were not qualified by these tests.
 A subsequent [four-GPU smoke Job](examples/gpu-validation/) passed on all four
 A100 80 GB GPUs of one Perlmutter node on 2026-09-29, including normal
 `kubectl logs` and independent Slurm accounting.
@@ -49,7 +50,7 @@ docker build -t "$IMAGE" .
 docker push "$IMAGE"
 ```
 
-`Dockerfile` accepts `GO_IMAGE` and `RUNTIME_IMAGE` build arguments. The Dell pilot
+`Dockerfile` accepts `GO_IMAGE` and `RUNTIME_IMAGE` build arguments. Validation
 used Go 1.24 on Linux amd64; the module declares Go 1.21. Build output includes
 `vk-nersc` and the optional `sfapi-probe` diagnostic helper. Record the pushed
 manifest digest and use it in Helm values. For an offline import, import the OCI
@@ -154,7 +155,7 @@ requires its exact configured CN. Serving certificate/key files reload on each
 handshake; renew the mounted Secret before expiry. Changes to the client CA or CN
 require an idle provider restart.
 
-On the tested Dell RKE2 cluster, advertising a virtual Node InternalIP caused
+On the tested RKE2 configuration, advertising a virtual Node InternalIP caused
 RKE2 to look for a nonexistent agent tunnel and return HTTP 502. Use the stable
 Service IP as `vkNodeAddress` and this extra environment setting:
 
@@ -168,7 +169,6 @@ This mode requires a numeric IP and advertises it as the sole Node `Hostname`
 address. The scheduling label `kubernetes.io/hostname` stays `perlmutter-vk`.
 Default mode advertises an InternalIP. Never reuse a physical node's IP. If the
 Service IP changes, issue a matching certificate and update values while idle.
-See [Dell lab deployment and validation](docs/dell-lab-deployment.md).
 
 ## Workload authentication
 
@@ -303,7 +303,7 @@ sfapi-probe prepare-image IMAGE@sha256:DIGEST < /private/path/sf_api.json
 ```
 
 Run it via `kubectl exec -i` inside the physical provider Pod when testing the
-allowlisted Dell egress path. It prints no access tokens. Account checks may
+allowlisted provider egress path. It prints no access tokens. Account checks may
 contain identity/allocation metadata; retain only fields needed for evidence.
 `preflight` inspects scratch, Podman-HPC, and Slurm associations without submitting
 a compute job. `prepare-image` performs image preparation on a login node.
@@ -458,7 +458,6 @@ Current staging annotations are read from the pod template. PVCs are still suppo
 | `cmd/sfapi-probe` | Independent diagnostics and cancellation |
 | `chart/` | Helm chart and environment starting points |
 | `examples/` | Workload templates requiring site values |
-| `docs/dell-lab-deployment.md` | Tested Dell installation details and gaps |
 | `.github/workflows/ci.yaml` | Go tests/build, image publication, chart packaging |
 
 The workflow builds Pull Requests without pushing images; main/manual runs have

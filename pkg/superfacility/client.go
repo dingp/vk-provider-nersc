@@ -358,6 +358,14 @@ func (c *Client) getComputeJobOutput(ctx context.Context, machine, jobID string)
 }
 
 func (c *Client) CancelJob(ctx context.Context, jobID string) error {
+	return c.CancelJobWithResolution(ctx, jobID, nil)
+}
+
+// CancelJobWithResolution reports the compute ID synchronously before any
+// compute-status or cancellation request. Callers can retain that ID even when
+// cancellation later fails and the submission task expires. A nil callback is
+// allowed. The callback must not block on cancellation completing.
+func (c *Client) CancelJobWithResolution(ctx context.Context, jobID string, onResolved func(string)) error {
 	// A submission task is not the Slurm allocation. Wait for its result instead
 	// of deleting it: otherwise completion racing with deletion can orphan a job.
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -382,6 +390,9 @@ func (c *Client) CancelJob(ctx context.Context, jobID string) error {
 				return err
 			}
 		}
+	}
+	if onResolved != nil {
+		onResolved(jobID)
 	}
 	status, err := c.getComputeJobStatus(ctx, machine, jobID)
 	if err != nil {
@@ -878,6 +889,9 @@ func normalizeSlurmStatus(status string) string {
 	case "F", "FAILED", "CA", "CANCELLED", "CANCELED", "TO", "TIMEOUT", "NF", "NODE_FAIL", "OOM", "OUT_OF_MEMORY", "BF", "BOOT_FAIL", "DL", "DEADLINE":
 		return "failed"
 	default:
+		// PREEMPTED can transition to requeued work; REVOKED can describe a
+		// federated sibling running elsewhere. Neither alone proves shutdown.
+		// https://slurm.schedmd.com/job_state_codes.html
 		return strings.ToLower(status)
 	}
 }

@@ -141,7 +141,7 @@ func TestCancelBootFailureAndDeadline(t *testing.T) {
 }
 
 func TestCancelRetainsRequeuedOrUnknownJobs(t *testing.T) {
-	for _, state := range []string{"REQUEUED", "REQUEUE_HOLD", "PENDING", "UNKNOWN"} {
+	for _, state := range []string{"REQUEUED", "REQUEUE_HOLD", "PENDING", "UNKNOWN", "PREEMPTED", "PR", "REVOKED", "RV"} {
 		t.Run(state, func(t *testing.T) {
 			client := newTestClient(func(r *http.Request) (*http.Response, error) {
 				if r.Method == http.MethodDelete {
@@ -153,6 +153,41 @@ func TestCancelRetainsRequeuedOrUnknownJobs(t *testing.T) {
 			defer cancel()
 			if err := client.CancelJob(ctx, "12345"); err == nil {
 				t.Fatal("nonterminal cancellation accepted")
+			}
+		})
+	}
+}
+
+func TestCancellationResolutionNotification(t *testing.T) {
+	for _, tc := range []struct {
+		name, taskBody string
+		wantCallback   bool
+	}{
+		{"completed", `{"status":"completed","result":"Submitted batch job 12345"}`, true},
+		{"pending", `{"status":"new"}`, false},
+		{"ambiguous", `{"status":"completed","result":"no job ID"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			notified := false
+			client := newTestClient(func(r *http.Request) (*http.Response, error) {
+				if strings.Contains(r.URL.Path, "/tasks/") {
+					return response(200, tc.taskBody), nil
+				}
+				if !notified {
+					t.Error("compute request preceded resolution callback")
+				}
+				return response(503, "accounting unavailable"), nil
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			err := client.CancelJobWithResolution(ctx, makeTaskJobRef("perlmutter", "task1"), func(id string) {
+				if notified || id != "12345" {
+					t.Errorf("unexpected callback: notified=%v ID=%q", notified, id)
+				}
+				notified = true
+			})
+			if err == nil || notified != tc.wantCallback {
+				t.Fatalf("notified=%v error=%v", notified, err)
 			}
 		})
 	}

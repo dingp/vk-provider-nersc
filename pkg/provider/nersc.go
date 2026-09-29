@@ -294,7 +294,15 @@ func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 		if err != nil {
 			return fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 		}
-		err = client.CancelJob(ctx, state.jobID)
+		if cancelling, ok := client.(interface {
+			CancelJobWithResolution(context.Context, string, func(string)) error
+		}); ok {
+			err = cancelling.CancelJobWithResolution(ctx, state.jobID, func(resolved string) {
+				p.retainResolvedJobID(key, &state, resolved)
+			})
+		} else {
+			err = client.CancelJob(ctx, state.jobID)
+		}
 		if err != nil {
 			log.Printf("Failed to cancel job %s for pod %s: %v", state.jobID, key, err)
 			return err
@@ -370,18 +378,26 @@ func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state
 		if err != nil {
 			return nil, "", fmt.Errorf("resolve submission for pod %s: %w", key, err)
 		}
-		if resolved != original {
-			p.mu.Lock()
-			if current, exists := p.podMap[key]; exists && current.pod == state.pod && current.jobID == original {
-				current.jobID = resolved
-				p.podMap[key] = current
-			}
-			p.mu.Unlock()
-			state.jobID = resolved
-			log.Printf("Pod %s resolved submission %s to Slurm job %s", key, original, resolved)
-		}
+		p.retainResolvedJobID(key, state, resolved)
 	}
 	return client, token, nil
+}
+
+// Both status polling and cancellation can discover a Slurm ID. Persist it
+// against the same submission identity, never against a same-name replacement.
+func (p *NerscProvider) retainResolvedJobID(key string, state *podJobState, resolved string) {
+	original := state.jobID
+	if resolved == "" || resolved == original {
+		return
+	}
+	p.mu.Lock()
+	if current, exists := p.podMap[key]; exists && current.pod == state.pod && current.jobID == original {
+		current.jobID = resolved
+		p.podMap[key] = current
+	}
+	p.mu.Unlock()
+	state.jobID = resolved
+	log.Printf("Pod %s resolved submission %s to Slurm job %s", key, original, resolved)
 }
 
 func (p *NerscProvider) jobIDForPodKey(key string) (string, bool) {

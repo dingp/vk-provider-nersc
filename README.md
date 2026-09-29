@@ -165,7 +165,8 @@ extraEnv:
     value: Hostname
 ```
 
-This mode requires a numeric IP and advertises it as the sole Node `Hostname`
+This mode requires an explicit numeric `VK_NODE_IP` (Helm `vkNodeAddress`); it
+does not fall back to `POD_IP`. It advertises the endpoint as the sole Node `Hostname`
 address. The scheduling label `kubernetes.io/hostname` stays `perlmutter-vk`.
 Default mode advertises an InternalIP. Never reuse a physical node's IP. If the
 Service IP changes, issue a matching certificate and update values while idle.
@@ -286,10 +287,20 @@ inconclusive until all remote work is reconciled. Never repeat an ambiguous crea
 ## Cancellation and cleanup
 
 Deleting an owned Pod asks the provider to resolve any submission task, cancel the
-real Slurm job, and confirm a terminal state. On uncertainty it retains tracking
+real Slurm job, and confirm a terminal state. Any Slurm ID discovered during
+cancellation is retained before subsequent requests, including when confirmation
+fails and the task later expires. On uncertainty it retains tracking
 and returns an error. Stop the Job/StatefulSet that could replace the Pod first.
 Record IDs before deleting anything; Kubernetes deletion alone is not evidence
 that remote compute has stopped.
+
+`BOOT_FAIL`/`BF` and `DEADLINE`/`DL` are terminal failures. The provider keeps
+tracking `PREEMPTED` and `REVOKED` until termination is confirmed: preemption may
+requeue work, and revocation can describe a federated sibling running elsewhere.
+If accounting remains in one of these ambiguous states, cancellation returns an
+error and requires independent reconciliation. See Slurm's
+[job state definitions](https://slurm.schedmd.com/job_state_codes.html) and
+[federation behavior](https://slurm.schedmd.com/federation.html).
 
 The helper reads combined credential JSON only from stdin:
 

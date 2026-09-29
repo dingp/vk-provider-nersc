@@ -41,7 +41,10 @@ func main() {
 	if nodeName == "" {
 		nodeName = "perlmutter-vk"
 	}
-	nodeAddress := firstNonEmpty(os.Getenv("VK_NODE_IP"), os.Getenv("POD_IP"), "127.0.0.1")
+	nodeAddress, addressAsHostname, err := resolveNodeAddress(os.Getenv("VK_NODE_ADDRESS_TYPE"), os.Getenv("VK_NODE_IP"), os.Getenv("POD_IP"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	kubeletListenAddr := firstNonEmpty(os.Getenv("VK_KUBELET_LISTEN_ADDR"), ":10250")
 	localTransferRoot := os.Getenv("SFAPI_TRANSFER_LOCAL_ROOT")
 
@@ -69,16 +72,7 @@ func main() {
 		log.Fatalf("Failed to create provider: %v", err)
 	}
 	prov.SetNodeAddress(nodeAddress)
-	switch os.Getenv("VK_NODE_ADDRESS_TYPE") {
-	case "", "InternalIP":
-	case "Hostname":
-		if net.ParseIP(nodeAddress) == nil {
-			log.Fatal("VK_NODE_ADDRESS_TYPE=Hostname requires a numeric VK_NODE_IP")
-		}
-		prov.SetNodeAddressAsHostname(true)
-	default:
-		log.Fatal("VK_NODE_ADDRESS_TYPE must be InternalIP or Hostname")
-	}
+	prov.SetNodeAddressAsHostname(addressAsHostname)
 	prov.SetLocalTransferRoot(localTransferRoot)
 
 	// Create the virtual node
@@ -174,6 +168,23 @@ func main() {
 		log.Fatalf("VK exited: %v", err)
 	}
 	log.Fatalf("VK controller exited")
+}
+
+// Hostname mode is intended for a stable endpoint such as a Service IP. Do not
+// silently advertise an ephemeral POD_IP or loopback fallback in this mode.
+func resolveNodeAddress(addressType, explicitIP, podIP string) (string, bool, error) {
+	switch addressType {
+	case "", "InternalIP":
+		return firstNonEmpty(explicitIP, podIP, "127.0.0.1"), false, nil
+	case "Hostname":
+		explicitIP = strings.TrimSpace(explicitIP)
+		if net.ParseIP(explicitIP) == nil {
+			return "", false, fmt.Errorf("VK_NODE_ADDRESS_TYPE=Hostname requires an explicit numeric VK_NODE_IP")
+		}
+		return explicitIP, true, nil
+	default:
+		return "", false, fmt.Errorf("VK_NODE_ADDRESS_TYPE must be InternalIP or Hostname")
+	}
 }
 
 func startKubeletAPI(ctx context.Context, listenAddr, nodeName, nodeAddress string, prov *provider.NerscProvider) (*http.Server, error) {

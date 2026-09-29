@@ -12,7 +12,7 @@ virtual Node Ready condition.
 | Provider | Helm release `vk-nersc`, namespace `vk-nersc-system` |
 | Physical placement | `rke2-worker2`, one replica, Recreate |
 | Source base | `b95233913b14f4e451ae483e0b6d658d8ee081f2` plus feature-branch changes |
-| Installed image | `localhost/dell-lab/vk-nersc@sha256:e1906a75c94b145f4828ca5bf5c888b892b6832e553c7986c8a7e21624ec223e` |
+| Installed image | `localhost/dell-lab/vk-nersc@sha256:c8e8b58f582e5c10adbce5b141460d69fcc99b578398dd91827ef20241f5141a` |
 | Distribution | OCI imported into worker2 RKE2 containerd; pull policy Never |
 | Virtual Node | `perlmutter-vk`, provider NoSchedule taint |
 | Log endpoint | ClusterIP Service `vk-nersc-kubelet`, `10.43.229.162:10250` |
@@ -21,9 +21,10 @@ virtual Node Ready condition.
 | Serving certificate expiry | 2026-10-29 06:18:04 UTC; renew before this |
 | Provider egress observed | `143.166.81.254` |
 
-The installed provider binary includes cancellation, TLS, and numeric Hostname
-routing fixes. Later README/example edits and the probe's `preflight` command do
-not change that provider binary; build the branch to include the latest helper.
+The installed provider binary includes cancellation, TLS, numeric Hostname
+routing, and resolved-Slurm-ID retention fixes from commit `6454394`. The image
+also contains the helper's `preflight` command. Subsequent documentation/example
+commits do not change the deployed provider binary.
 The image above exists only in that lab's worker2 containerd and cannot be pulled
 from a public registry.
 
@@ -118,7 +119,7 @@ replaced by its managing chart controller.
 
 ## Compute validation results
 
-All four jobs used `nstaff/debug`, one CPU node, and a five-minute walltime.
+All five jobs used `nstaff/debug`, one CPU node, and a five-minute walltime.
 The test image was `docker.io/library/debian@sha256:f3034a6ec3c1205360777c4aae76234998866ad18806ae62b63a3f84ccad782b`,
 pulled and migrated by the same NERSC identity before submission.
 
@@ -128,11 +129,12 @@ pulled and migrated by the same NERSC identity before submission.
 | Kubernetes Job | 8602463 | 59065016 | nid004258 | Complete, one Pod, exit 0, success marker |
 | Failure Job | 8602464 | 59065137 | nid006061 | Failed, payload exit 7, no replacement retries |
 | Cancellation Pod | 8602465 | 59065194 | nid006251 | Provider deletion cancelled running job; independent accounting confirmed CANCELLED |
+| Resolved-ID regression | 8602472 | 59065733 | See final ledger | Fixed image retained the real Slurm ID and cancelled the running job |
 
 Running-job cancellation was confirmed about 15 seconds after deletion. The
 queue started too quickly to exercise deletion while pending; task-completion
 races are covered by Go tests. Kubernetes reports generic exit 1 for the failure
-case; Slurm records the actual exit 7. The approved six-submission limit was not
+case; Slurm records the actual exit 7. Five of six approved submissions were used. The limit was not
 exhausted. Debug queue waits were short; the user-authorized fallback
 `amsc013/express_amsc` was not needed.
 
@@ -147,6 +149,22 @@ TLS authentication, and cancellation races passed focused tests. No replacement
 client credentials were supplied for a live key-rotation test. GPU, staging,
 StatefulSets, in-flight restart recovery, and multi-user isolation remain
 unqualified.
+
+SFAPI task records returned 404 during final reconciliation despite known terminal
+Slurm jobs. The feature branch now stores each resolved Slurm ID in per-Pod state
+across client/token refreshes, with regression tests for status/logs/cancellation
+after task expiry. A fifth live cancellation test on the updated image passed.
+The idle upgrade passed the complete installation check suite again.
+
+The user reports SFAPI client expiry in approximately 30 days from 2026-09-29;
+verify the exact portal timestamp before future sessions. The workload Secret and
+temporary combined key are removed after final reconciliation. Original user key
+files and remote output/image data are retained.
+
+The [reusable CPU examples](../examples/dell-lab-cpu/) include all four workload
+shapes and a renderer with account/QOS/node-count/walltime controls. Rendering all
+four with `amsc013/express_amsc` passed Kubernetes server dry-run. These are
+rendering checks; actual live jobs used `nstaff/debug`.
 
 ## Session limits and teardown
 

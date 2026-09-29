@@ -203,6 +203,11 @@ job has reached a confirmed terminal state, including during cancellation.
 
 ## First CPU job
 
+Use the [tested CPU validation examples](examples/dell-lab-cpu/) for successful
+Pod/Job, deliberate failure, and cancellation cases. Their renderer lets you set
+account, QOS, node count, walltime, namespace, and unique workload names.
+
+
 Prepare a digest-pinned image with the same NERSC identity on a login node using
 `podman-hpc pull IMAGE@sha256:DIGEST`. Verify migrated image availability before
 submitting compute work. The provider does not pre-pull images for you.

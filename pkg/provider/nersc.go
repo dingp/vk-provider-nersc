@@ -285,7 +285,7 @@ func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 
 	key := podKey(pod)
 	if state, exists := p.jobStateForPodKey(key); exists {
-		client, _, err := p.clientForPodState(ctx, key, state)
+		client, _, err := p.clientForPodState(ctx, key, &state)
 		if err != nil {
 			return fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 		}
@@ -337,7 +337,7 @@ func (p *NerscProvider) clientForToken(token string) (jobClient, error) {
 	return p.sfClientFactory(token), nil
 }
 
-func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state podJobState) (jobClient, string, error) {
+func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state *podJobState) (jobClient, string, error) {
 	if state.pod == nil {
 		return nil, "", fmt.Errorf("pod %s missing stored credential reference", key)
 	}
@@ -348,6 +348,31 @@ func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state
 	client, err := p.clientForToken(token)
 	if err != nil {
 		return nil, "", err
+	}
+	// SFAPI submission tasks can expire before their compute jobs do. Retain the
+	// resolved Slurm ID in the provider's existing per-Pod state, across clients
+	// and token refreshes, as soon as a task produces it.
+	if current, ok := p.jobStateForPodKey(key); ok {
+		state.jobID = current.jobID
+	}
+	if resolver, ok := client.(interface {
+		ResolveJobID(context.Context, string) (string, error)
+	}); ok {
+		original := state.jobID
+		resolved, err := resolver.ResolveJobID(ctx, original)
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve submission for pod %s: %w", key, err)
+		}
+		if resolved != original {
+			p.mu.Lock()
+			if current, exists := p.podMap[key]; exists && current.jobID == original {
+				current.jobID = resolved
+				p.podMap[key] = current
+			}
+			p.mu.Unlock()
+			state.jobID = resolved
+			log.Printf("Pod %s resolved submission %s to Slurm job %s", key, original, resolved)
+		}
 	}
 	return client, token, nil
 }
@@ -387,7 +412,7 @@ func (p *NerscProvider) GetPod(ctx context.Context, namespace, name string) (*co
 	if !exists {
 		return nil, fmt.Errorf("pod %s not found", key)
 	}
-	client, token, err := p.clientForPodState(ctx, key, state)
+	client, token, err := p.clientForPodState(ctx, key, &state)
 	if err != nil {
 		return nil, fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 	}
@@ -432,7 +457,7 @@ func (p *NerscProvider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 		}
 		namespace, name := parts[0], parts[1]
 
-		client, token, err := p.clientForPodState(ctx, key, state)
+		client, token, err := p.clientForPodState(ctx, key, &state)
 		if err != nil {
 			log.Printf("Failed to create Superfacility client for pod %s: %v", key, err)
 			continue
@@ -527,7 +552,7 @@ func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, contain
 	if !exists {
 		return nil, fmt.Errorf("pod %s not found", key)
 	}
-	client, _, err := p.clientForPodState(ctx, key, state)
+	client, _, err := p.clientForPodState(ctx, key, &state)
 	if err != nil {
 		return nil, fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 	}

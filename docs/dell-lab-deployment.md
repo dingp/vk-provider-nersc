@@ -2,9 +2,9 @@
 
 ## Verified installation (2026-09-29 UTC)
 
-This record covers the credential-free installation and subsequent successful
-SFAPI identity check. Compute execution results are tracked separately; Node Ready
-is not evidence that a Perlmutter payload ran.
+This record covers installation, SFAPI authentication, and bounded CPU validation.
+The compute evidence below establishes payload execution independently of the
+virtual Node Ready condition.
 
 | Item | Observed value |
 | --- | --- |
@@ -116,7 +116,39 @@ For a long-lived deployment, reconcile exclusions into the source Helm chart
 configuration with a planned networking rollout; a live DaemonSet patch can be
 replaced by its managing chart controller.
 
-## Remaining qualification and teardown
+## Compute validation results
+
+All four jobs used `nstaff/debug`, one CPU node, and a five-minute walltime.
+The test image was `docker.io/library/debian@sha256:f3034a6ec3c1205360777c4aae76234998866ad18806ae62b63a3f84ccad782b`,
+pulled and migrated by the same NERSC identity before submission.
+
+| Case | SFAPI task | Slurm job | Compute node | Result |
+| --- | --- | --- | --- | --- |
+| Bare Pod | 8602462 | 59064981 | nid005001 | Succeeded, exit 0, success marker through `kubectl logs` |
+| Kubernetes Job | 8602463 | 59065016 | nid004258 | Complete, one Pod, exit 0, success marker |
+| Failure Job | 8602464 | 59065137 | nid006061 | Failed, payload exit 7, no replacement retries |
+| Cancellation Pod | 8602465 | 59065194 | nid006251 | Provider deletion cancelled running job; independent accounting confirmed CANCELLED |
+
+Running-job cancellation was confirmed about 15 seconds after deletion. The
+queue started too quickly to exercise deletion while pending; task-completion
+races are covered by Go tests. Kubernetes reports generic exit 1 for the failure
+case; Slurm records the actual exit 7. The approved six-submission limit was not
+exhausted. Debug queue waits were short; the user-authorized fallback
+`amsc013/express_amsc` was not needed.
+
+Evidence is under `reports/vk-nersc/20260929-cpu/` in the operations workspace:
+Pod/Job identities, submission ledger, remote final accounting, lifecycle logs,
+payload stdout, and cleanup report. Container hostnames alone were not used as
+proof of compute-node execution. Slurm stdout remained in the user home directory;
+`scratchBase` changes volume/staging paths, not the Slurm working directory.
+
+Secret resourceVersion rotation, token expiry/refresh, transient status errors,
+TLS authentication, and cancellation races passed focused tests. No replacement
+client credentials were supplied for a live key-rotation test. GPU, staging,
+StatefulSets, in-flight restart recovery, and multi-user isolation remain
+unqualified.
+
+## Session limits and teardown
 
 The CPU pilot is limited to six total submissions, serial, one CPU node and five
 minutes per job. Record Pod UID, SFAPI task, resolved Slurm ID, compute NodeList,

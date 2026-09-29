@@ -205,6 +205,31 @@ func (c *Client) SubmitJob(ctx context.Context, req JobSubmissionRequest) (strin
 	return makeTaskJobRef(req.System, out.TaskID), nil
 }
 
+// ResolveJobID returns the real Slurm ID when a Perlmutter submission task has
+// completed. Pending tasks keep their reference. Callers must retain the resolved
+// ID because the SFAPI task record can disappear independently of the Slurm job.
+func (c *Client) ResolveJobID(ctx context.Context, jobID string) (string, error) {
+	machine, taskID, ok := parseTaskJobRef(jobID)
+	if !ok {
+		return jobID, nil
+	}
+	if machine != "perlmutter" {
+		return "", fmt.Errorf("job ID resolution only supports perlmutter")
+	}
+	task, err := c.getTask(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(task.Status, "completed") {
+		return jobID, nil
+	}
+	resolved := extractSlurmJobID(task.Result)
+	if resolved == "" {
+		return "", fmt.Errorf("task %s completed without a confirmed Slurm job ID", taskID)
+	}
+	return resolved, nil
+}
+
 func (c *Client) GetJobStatus(ctx context.Context, jobID string) (string, error) {
 	if machine, taskID, ok := parseTaskJobRef(jobID); ok {
 		return c.getTaskBackedJobStatus(ctx, machine, taskID)

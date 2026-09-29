@@ -15,6 +15,11 @@ The provider implements submission, status, cancellation, and job log retrieval.
 It also implements optional file staging, sidecars, and StatefulSet scratch paths.
 See [limitations](#operating-limits) before deploying controllers that create work.
 
+The Dell pilot passed CPU Pod/Job execution, ordinary Kubernetes logs, deliberate
+failure, and running-job cancellation on 2026-09-29. See the
+[validation record](docs/dell-lab-deployment.md#compute-validation-results). GPU
+execution, data staging, and StatefulSets were not qualified by that pilot.
+
 ## Prerequisites
 
 - Kubernetes access with permission to install the chart's cluster-scoped RBAC and
@@ -355,7 +360,7 @@ Supported Slurm annotations:
 | `nersc.slurm/partition` | `#SBATCH --partition`; omitted by default. Prefer `nersc.slurm/qos` and `nersc.slurm/constraint` on Perlmutter unless you know a partition is required. |
 | `nersc.slurm/qos` | `#SBATCH --qos`; omitted by default. |
 | `nersc.slurm/constraint` | `#SBATCH --constraint`; omitted by default. |
-| `nersc.slurm/account` | `#SBATCH --account`; omitted by default. The provider also sends this value as the Superfacility API job `project`. |
+| `nersc.slurm/account` | `#SBATCH --account`; omitted by default. The generated `#SBATCH --account` selects the Slurm account; the internal SFAPI request project field is not serialized. |
 
 Invalid annotation values fail pod submission before the Slurm job is created.
 

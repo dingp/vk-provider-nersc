@@ -9,6 +9,11 @@ metadata:
 spec:
   nodeSelector:
     kubernetes.io/hostname: perlmutter-vk
+  tolerations:
+  - key: virtual-kubelet.io/provider
+    operator: Equal
+    value: nersc
+    effect: NoSchedule
   containers:
   - name: worker
     image: registry.example.com/worker:latest

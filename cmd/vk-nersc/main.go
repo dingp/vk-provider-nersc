@@ -69,6 +69,16 @@ func main() {
 		log.Fatalf("Failed to create provider: %v", err)
 	}
 	prov.SetNodeAddress(nodeAddress)
+	switch os.Getenv("VK_NODE_ADDRESS_TYPE") {
+	case "", "InternalIP":
+	case "Hostname":
+		if net.ParseIP(nodeAddress) == nil {
+			log.Fatal("VK_NODE_ADDRESS_TYPE=Hostname requires a numeric VK_NODE_IP")
+		}
+		prov.SetNodeAddressAsHostname(true)
+	default:
+		log.Fatal("VK_NODE_ADDRESS_TYPE must be InternalIP or Hostname")
+	}
 	prov.SetLocalTransferRoot(localTransferRoot)
 
 	// Create the virtual node
@@ -170,16 +180,12 @@ func startKubeletAPI(ctx context.Context, listenAddr, nodeName, nodeAddress stri
 	mux := http.NewServeMux()
 	mux.HandleFunc("/containerLogs/", handleContainerLogs(prov))
 
-	cert, err := selfSignedServingCert(nodeName, nodeAddress)
+	tlsConfig, err := kubeletTLSConfig(nodeName, nodeAddress)
 	if err != nil {
 		return nil, err
 	}
 
-	listener, err := tls.Listen("tcp", listenAddr, &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequestClientCert,
-	})
+	listener, err := tls.Listen("tcp", listenAddr, tlsConfig)
 	if err != nil {
 		return nil, err
 	}

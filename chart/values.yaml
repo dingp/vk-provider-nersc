@@ -1,15 +1,23 @@
 # Default Helm values for Virtual Kubelet NERSC provider
 
 replicaCount: 1
+strategy:
+  type: Recreate
 
 image:
   repository: ghcr.io/dingp/vk-provider-nersc
   tag: latest
+  digest: ""
   pullPolicy: IfNotPresent
+imagePullSecrets: []
+kubeletTLS:
+  secretName: ""
+  clientCommonName: "kube-apiserver"
 
 sfApiEndpoint: "https://api.nersc.gov/api/v1.2"
 
 vkNodeName: "perlmutter-vk"
+vkNodeAddress: ""
 
 kubeletPort: 10250
 

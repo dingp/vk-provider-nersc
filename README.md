@@ -1,135 +1,310 @@
-# Virtual Kubelet Provider for NERSC Perlmutter
+# Virtual Kubelet provider for NERSC Perlmutter
 
-This project implements a **Virtual Kubelet provider** that connects NERSC's **Perlmutter** supercomputer to a Kubernetes cluster using:
+This provider translates Kubernetes Pods into Slurm jobs on Perlmutter through
+NERSC's Superfacility API (SFAPI). Containers run with Podman-HPC on the allocated
+compute nodes. Kubernetes runs the provider on a physical cluster node; it does
+not install a Kubernetes kubelet on Perlmutter.
 
-- [Virtual Kubelet](https://virtual-kubelet.io/)
-- NERSC **Superfacility API**
-- **Podman-HPC** for container execution
-- Slurm job submission
-- Optional Globus **data staging** via Superfacility API
-- **PVC integration**
-- **StatefulSet-aware** scratch paths and per-replica staging
-
-It allows Kubernetes workloads (Pods, Jobs, StatefulSets) to be scheduled onto Perlmutter compute nodes transparently.
-
----
-
-## Features
-
-- Submit K8s Pods as Slurm jobs via Superfacility API
-- Run containers with Podman-HPC on Perlmutter
-- Monitor job status and map to Pod phases
-- Retrieve logs from HPC jobs
-- Optional Globus stage-in/out via Superfacility API annotations
-- Slurm resource annotations for multi-node jobs
-- PVC integration for volume mounts
-- StatefulSet-aware scratch paths and per-replica staging
-- Helm chart for easy deployment (dev & prod)
-- CI/CD pipeline via GitHub Actions
-- Helmfile for multi-env deployment
-
----
-
-## Project Structure
-
-```
-vk-provider-nersc/
-├── cmd/vk-nersc/               # Main VK provider entrypoint
-├── pkg/provider/               # Provider logic
-├── pkg/scripts/                 # Slurm script generation
-├── pkg/superfacility/           # Superfacility API client
-├── chart/                       # Helm chart
-├── examples/                    # Example manifests
-├── .github/workflows/           # CI/CD pipeline
-├── Dockerfile                   # Container build
-├── Makefile                     # Build/run targets
-├── helmfile.yaml                # Multi-env deployment
-└── README.md                    # This file
+```text
+Pod/Job → Kubernetes scheduler → perlmutter-vk → SFAPI task → Slurm job
+                                                            ↓
+                                      Perlmutter compute node + Podman-HPC
 ```
 
----
+The provider implements submission, status, cancellation, and job log retrieval.
+It also implements optional file staging, sidecars, and StatefulSet scratch paths.
+See [limitations](#operating-limits) before deploying controllers that create work.
 
-## Build & Run Locally
+## Prerequisites
+
+- Kubernetes access with permission to install the chart's cluster-scoped RBAC and
+  virtual Node, Helm 3, and one physical Linux amd64 worker.
+- A built provider image accessible to that worker, preferably pinned by digest.
+- Outbound HTTPS from the provider to SFAPI and the NERSC OIDC token service.
+- An API-server-to-provider route on TCP 10250, a serving certificate trusted by the
+  API server, and the CA/CN of the API server's kubelet client certificate.
+- For workloads: an SFAPI client with job/command permissions, its client ID and
+  RSA private JWK, permitted source IPs and an unexpired client; a valid NERSC
+  account/QOS, writable scratch space, and a container prepared for Podman-HPC.
+
+Read the current [SFAPI authentication guide](https://docs.nersc.gov/services/sfapi/authentication/)
+and [Podman-HPC guide](https://docs.nersc.gov/development/containers/podman-hpc/overview/).
+Account, QOS, image, and scratch placeholders below must be replaced before use.
+
+## Build and test
 
 ```bash
-make build
+make test
+make build build-probe
+# Set IMAGE to your own repository and revision tag.
+export IMAGE=registry.example.com/your-team/vk-nersc:your-revision
+docker build -t "$IMAGE" .
+docker push "$IMAGE"
+```
+
+`Dockerfile` accepts `GO_IMAGE` and `RUNTIME_IMAGE` build arguments. The Dell pilot
+used Go 1.24 on Linux amd64; the module declares Go 1.21. Build output includes
+`vk-nersc` and the optional `sfapi-probe` diagnostic helper. Record the pushed
+manifest digest and use it in Helm values. For an offline import, import the OCI
+archive on the selected worker, verify its containerd digest, and use
+`image.pullPolicy: Never`; other workers will not have that image.
+
+Local development uses a real cluster and creates a virtual Node:
+
+```bash
+export KUBECONFIG=/absolute/path/to/kubeconfig
 export SF_API_ENDPOINT=https://api.nersc.gov/api/v1.2
-export VK_NODE_NAME=perlmutter-vk
+export VK_NODE_NAME=perlmutter-vk-dev
+export VK_NODE_IP=<address-reachable-from-api-server>
 ./bin/vk-nersc
 ```
 
-Workloads provide their own Superfacility API client credentials through a Kubernetes Secret referenced by pod annotations. The provider exchanges those credentials for short-lived access tokens as needed.
+Set the TLS variables described below for authenticated log serving. The local
+fallback certificate is self-signed and lasts 24 hours; it has no client
+certificate authentication. Keep that mode isolated to development.
 
----
+## Install the provider
 
-## Build & Push Docker Image
+Use a single release per cluster. The chart currently uses fixed Deployment and
+cluster RBAC names; `helmfile.yaml` is an environment sketch and cannot safely
+install both releases into the same cluster without first fixing those names.
+The `values-dev.yaml` and `values-production.yaml` files are starting points, not
+complete secure installations.
 
-```bash
-docker build -t ghcr.io/dingp/vk-provider-nersc:latest .
-docker push ghcr.io/dingp/vk-provider-nersc:latest
-```
+1. Inspect the cluster and select a Ready physical worker. Check DaemonSets that
+   tolerate every taint; exclude `type=virtual-kubelet` from system agents before
+   creating the virtual Node.
+2. Reserve a stable endpoint for kubelet logs, such as a ClusterIP Service with
+   selector `app: vk-nersc`, port/targetPort 10250, in `vk-nersc-system`. The chart
+   does **not** create this Service or a NetworkPolicy.
+3. Create a serving certificate whose SAN includes that endpoint. Its issuer must
+   match the API server's `--kubelet-certificate-authority`. Create the Secret:
 
----
+   ```bash
+   kubectl create namespace vk-nersc-system
+   kubectl -n vk-nersc-system create secret generic vk-nersc-tls \
+     --from-file=tls.crt=/private/path/serving.crt \
+     --from-file=tls.key=/private/path/serving.key \
+     --from-file=client-ca.crt=/private/path/kubelet-client-ca.crt
+   ```
 
-## Deploy with Helm
+   The client CA is the issuer of the API server's **client** certificate and may
+   differ from the serving CA. Keep all private keys outside this repository.
+4. Create `values-site.yaml`, replacing the endpoint, physical hostname, digest,
+   and client CN with inspected values:
 
-### Dev Deployment
-```bash
-helm install vk-nersc ./chart -f chart/values-dev.yaml
-```
+   ```yaml
+   replicaCount: 1
+   strategy:
+     type: Recreate
+   image:
+     repository: registry.example.com/your-team/vk-nersc
+     digest: sha256:<manifest-digest>
+     pullPolicy: IfNotPresent
+   vkNodeName: perlmutter-vk
+   vkNodeAddress: <stable-endpoint-ip>
+   kubeletPort: 10250
+   kubeletTLS:
+     secretName: vk-nersc-tls
+     clientCommonName: <actual-api-server-client-certificate-CN>
+   nodeSelector:
+     kubernetes.io/hostname: <physical-worker-hostname>
+   resources:
+     requests: {cpu: 100m, memory: 128Mi}
+     limits: {cpu: '1', memory: 512Mi}
+   statefulset:
+     enabled: false
+   ```
 
-### Production Deployment
-```bash
-helm install vk-nersc ./chart -f chart/values-production.yaml
-```
+   Add `imagePullSecrets` if required. Restrict kubelet ingress with an enforced
+   NetworkPolicy to the API server's observed source addresses. Do not assume
+   traffic retains the physical host address across the CNI.
+5. Render, inspect, and install:
 
----
+   ```bash
+   helm lint ./chart -f values-site.yaml
+   helm template vk-nersc ./chart -n vk-nersc-system -f values-site.yaml > rendered.yaml
+   kubectl apply --dry-run=server -f rendered.yaml
+   helm upgrade --install vk-nersc ./chart -n vk-nersc-system \
+     -f values-site.yaml --wait --timeout 180s
+   kubectl -n vk-nersc-system get pods -o wide
+   kubectl get node perlmutter-vk -o yaml
+   kubectl -n vk-nersc-system logs deployment/vk-nersc
+   ```
 
-## Deploy Both Dev & Prod with Helmfile
+Before adding SFAPI credentials, verify advancing Node heartbeats, no system Pods
+on the virtual Node, egress to SFAPI/OIDC, rejected anonymous kubelet connections,
+and a request through the API server to the log endpoint. A missing-Pod error
+from the provider proves routing/TLS reachability; it does not prove workload
+execution. TCP readiness checks can produce harmless TLS handshake EOF messages.
 
-```bash
-helmfile apply
-```
+### Kubelet TLS and RKE2
 
----
+The TLS environment variables are `VK_TLS_CERT_FILE`, `VK_TLS_KEY_FILE`,
+`VK_TLS_CLIENT_CA_FILE`, and `VK_TLS_CLIENT_COMMON_NAME`. Set all four. Partial
+configuration fails closed. The listener verifies the client certificate and
+requires its exact configured CN. Serving certificate/key files reload on each
+handshake; renew the mounted Secret before expiry. Changes to the client CA or CN
+require an idle provider restart.
 
-## Workload Authentication
-
-The provider does not use global Superfacility API credentials. Each workload must reference a Kubernetes Secret in the workload namespace. The preferred Secret shape matches the official SFAPI Python client key file:
-
-```bash
-kubectl create secret generic sfapi-client \
-  --from-file=sf_api.json=./sf_api.json
-```
-
-`sf_api.json` contains the SFAPI `client_id` and RSA JWK private key:
-
-```json
-{
-  "client_id": "<your_sfapi_client_id>",
-  "secret": {
-    "kty": "RSA",
-    "n": "...",
-    "e": "...",
-    "d": "...",
-    "p": "...",
-    "q": "...",
-    "dp": "...",
-    "dq": "...",
-    "qi": "..."
-  }
-}
-```
+On the tested Dell RKE2 cluster, advertising a virtual Node InternalIP caused
+RKE2 to look for a nonexistent agent tunnel and return HTTP 502. Use the stable
+Service IP as `vkNodeAddress` and this extra environment setting:
 
 ```yaml
-metadata:
-  annotations:
-    nersc.sf/credentialSecretName: "sfapi-client"
+extraEnv:
+  - name: VK_NODE_ADDRESS_TYPE
+    value: Hostname
 ```
 
-`nersc.sf/credentialSecretKey` defaults to `sf_api.json`. The provider also supports Secrets with separate `client_id` and `jwk` keys. Access tokens are minted and refreshed in memory and are never written into generated Slurm scripts.
+This mode requires a numeric IP and advertises it as the sole Node `Hostname`
+address. The scheduling label `kubernetes.io/hostname` stays `perlmutter-vk`.
+Default mode advertises an InternalIP. Never reuse a physical node's IP. If the
+Service IP changes, issue a matching certificate and update values while idle.
+See [Dell lab deployment and validation](docs/dell-lab-deployment.md).
 
----
+## Workload authentication
+
+After the installation checks pass, create a dedicated test namespace and Secret.
+Credentials belong to the **workload namespace**, and their annotation belongs
+on the **Pod template** of a Job/StatefulSet. The provider uses no global SFAPI key.
+
+For separate downloaded client ID and private JWK files:
+
+```bash
+chmod 600 /private/path/clientid.txt /private/path/priv_key.jwk
+kubectl create namespace nersc-vk-tests
+kubectl -n nersc-vk-tests create secret generic sfapi-client \
+  --from-file=client_id=/private/path/clientid.txt \
+  --from-file=jwk=/private/path/priv_key.jwk
+```
+
+The PEM private key is not required. Alternatively use
+`--from-file=sf_api.json=/private/path/sf_api.json` with this JSON shape:
+
+```json
+{"client_id":"<client-id>","secret":{"kty":"RSA","n":"...","e":"...","d":"...","p":"...","q":"...","dp":"...","dq":"...","qi":"..."}}
+```
+
+Set `nersc.sf/credentialSecretName: sfapi-client` on the Pod. For a custom JSON
+Secret key set `nersc.sf/credentialSecretKey`; the default JSON key is
+`sf_api.json`. Omit that annotation when using the separate-key format.
+
+A Pod without a credential annotation is ignored. A missing Secret or malformed
+key fails before job submission. Access tokens stay in memory and out of Slurm
+scripts. The resolver observes Secret resourceVersion changes; replace Secret
+data in place to rotate credentials. Keep credentials usable until every remote
+job has reached a confirmed terminal state, including during cancellation.
+
+## First CPU job
+
+Prepare a digest-pinned image with the same NERSC identity on a login node using
+`podman-hpc pull IMAGE@sha256:DIGEST`. Verify migrated image availability before
+submitting compute work. The provider does not pre-pull images for you.
+
+Copy [examples/job.yaml](examples/job.yaml), select `nersc-vk-tests`, replace its
+account/image placeholders, and set `nersc.slurm/constraint: cpu`, an allowed QOS,
+`nersc.slurm/nodes: '1'`, and `nersc.slurm/time: '00:05:00'`. Start with one Job,
+`backoffLimit: 0`, `restartPolicy: Never`, and a deterministic short command.
+Every workload must include both scheduling fields:
+
+```yaml
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: perlmutter-vk
+  tolerations:
+    - key: virtual-kubelet.io/provider
+      operator: Equal
+      value: nersc
+      effect: NoSchedule
+```
+
+For a Job, these fields go under `spec.template.spec`. Keep both; using `nodeName`
+bypasses the scheduler and does not test scheduling isolation.
+
+```bash
+kubectl -n nersc-vk-tests create -f my-cpu-job.yaml
+kubectl -n nersc-vk-tests get pods -o wide
+kubectl -n nersc-vk-tests describe job hpc-job
+kubectl -n nersc-vk-tests logs job/hpc-job
+kubectl -n vk-nersc-system logs deployment/vk-nersc
+```
+
+Record the Pod UID and provider's submission reference. An `sfapi-task:` reference
+is an asynchronous submission task, **not** a Slurm job ID. Resolve it through
+SFAPI before querying/cancelling the real job. Acceptance requires Slurm account,
+compute NodeList and terminal state, deterministic stdout, Pod success, and Job
+completion. Set a submission budget and queue timeout before tests; a timeout is
+inconclusive until all remote work is reconciled. Never repeat an ambiguous create.
+
+## Operating limits
+
+- One provider replica, `Recreate`, and no in-flight restart/failover recovery.
+  Job mappings and staging state are in memory. Reconcile remote jobs and stop
+  replacement-producing controllers before any planned restart or upgrade.
+- Node `Ready` and advertised 1000 CPUs/1000 GiB/1000 Pods are synthetic. They do
+  not represent Slurm availability, allocation entitlement, or SFAPI health.
+- The chart grants cluster-wide Secret read/list/watch to resource informers.
+  Use only in a trusted cluster; namespace tenancy isolation is not implemented.
+- The kubelet-compatible endpoint implements logs only. `exec`, attach, port
+  forwarding, Pod networking/Services, and full kubelet behavior are unavailable.
+- Container phases/exit status are synthesized. Failed containers report exit 1;
+  inspect Slurm accounting for the actual payload exit code. Logs aggregate job
+  stdout, not separate per-container streams. `logs -f` waits for job completion
+  and then returns stdout; other parsed log options are not fully implemented.
+- Volumes map to Perlmutter scratch directories by volume name. A local CSI/PVC
+  does not mount its data on Perlmutter automatically; stage data explicitly.
+  Container `env`, Secret/ConfigMap volume contents, and Kubernetes image pull
+  secrets are not forwarded to Podman-HPC by the current script generator.
+- GPU Slurm annotations allocate resources, but the generator does not currently
+  add Podman-HPC GPU activation or forward rank/GPU environment variables.
+  GPU execution requires additional implementation and validation. Do not assume
+  local `nvidia.com/gpu` resources or Dell DRA claims apply to the virtual Node.
+- StatefulSets can create replacement work and provide scratch naming only;
+  service networking and general persistent Kubernetes storage semantics do not
+  carry over. Keep the optional chart example disabled during qualification.
+- Keep kubelet port 10250: the provider currently advertises that port regardless
+  of a customized listener port.
+
+## Cancellation and cleanup
+
+Deleting an owned Pod asks the provider to resolve any submission task, cancel the
+real Slurm job, and confirm a terminal state. On uncertainty it retains tracking
+and returns an error. Stop the Job/StatefulSet that could replace the Pod first.
+Record IDs before deleting anything; Kubernetes deletion alone is not evidence
+that remote compute has stopped.
+
+The helper reads combined credential JSON only from stdin:
+
+```bash
+sfapi-probe check < /private/path/sf_api.json
+sfapi-probe preflight /pscratch/sd/u/username < /private/path/sf_api.json
+sfapi-probe task TASK_ID < /private/path/sf_api.json
+sfapi-probe job SLURM_JOB_ID < /private/path/sf_api.json
+sfapi-probe cancel SLURM_JOB_ID < /private/path/sf_api.json
+sfapi-probe prepare-image IMAGE@sha256:DIGEST < /private/path/sf_api.json
+```
+
+Run it via `kubectl exec -i` inside the physical provider Pod when testing the
+allowlisted Dell egress path. It prints no access tokens. Account checks may
+contain identity/allocation metadata; retain only fields needed for evidence.
+`preflight` inspects scratch, Podman-HPC, and Slurm associations without submitting
+a compute job. `prepare-image` performs image preparation on a login node.
+
+If the provider crashes, stop controllers, independently query the saved SFAPI
+tasks and Slurm IDs, and cancel only owned jobs. Do not restart and replay tracked
+Pods until uncertain submissions are resolved. After all owned jobs are confirmed
+terminal, save logs, delete owned workloads, remove their credential Secret, and
+remove the provider if desired:
+
+```bash
+helm uninstall vk-nersc -n vk-nersc-system
+kubectl delete node perlmutter-vk
+```
+
+The virtual Node is created by the provider and is not Helm-owned. Separately
+created Services, NetworkPolicies, TLS Secrets, and DaemonSet exclusions also
+need explicit cleanup. Keep remote output files unless their deletion is intended.
 
 ## Slurm Resource Annotations
 
@@ -184,218 +359,17 @@ Supported Slurm annotations:
 
 Invalid annotation values fail pod submission before the Slurm job is created.
 
-### Example: 2 GPU Nodes, 8 GPU Ranks
 
-Create the per-workload credential Secret, then submit a Kubernetes `Job` that targets the virtual Perlmutter node. Replace the Slurm account, client credentials, and image with values for your account and workload.
+## Sidecars and StatefulSets
 
-```bash
-kubectl create secret generic sfapi-client \
-  --from-file=sf_api.json=./sf_api.json
-```
+Multi-container Pods use one Slurm allocation and one Podman pod. The first
+container is the main container unless `nersc.vk/mainContainer` selects another.
+Sidecars start first and are stopped after the main container exits; startup
+readiness is the workload's responsibility. `launcher=srun` supports only
+single-container Pods.
 
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: perlmutter-gpu-ranks
-spec:
-  template:
-    metadata:
-      annotations:
-        nersc.slurm/account: "m1234"
-        nersc.sf/credentialSecretName: "sfapi-client"
-        nersc.slurm/nodes: "2"
-        nersc.slurm/ntasks: "8"
-        nersc.slurm/tasks-per-node: "4"
-        nersc.slurm/cpus-per-task: "16"
-        nersc.slurm/gpus-per-node: "4"
-        nersc.slurm/gpus-per-task: "1"
-        nersc.slurm/launcher: "srun"
-        nersc.slurm/mem: "128GB"
-        nersc.slurm/time: "00:30:00"
-        nersc.slurm/qos: "debug"
-        nersc.slurm/constraint: "gpu"
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: perlmutter-vk
-      restartPolicy: Never
-      containers:
-      - name: ranks
-        image: registry.example.com/cuda-runtime:latest
-        command: ["bash", "-lc"]
-        args:
-        - |
-          echo "rank=${SLURM_PROCID} local_rank=${SLURM_LOCALID} cuda_visible_devices=${CUDA_VISIBLE_DEVICES}"
-          nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader
-        resources:
-          requests:
-            cpu: "16"
-            memory: "8Gi"
-  backoffLimit: 0
-```
-
-Apply it with:
-
-```bash
-kubectl apply -f perlmutter-gpu-ranks.yaml
-```
-
-Behind the scenes:
-
-```text
-kubectl apply
-     |
-     v
-Kubernetes API server
-     |
-     v
-Job controller creates Pod
-     |
-     v
-Scheduler binds Pod to virtual node: perlmutter-vk
-     |
-     v
-Virtual Kubelet calls NERSC provider CreatePod
-     |
-     +--> read workload Secret: nersc.sf/credentialSecretName
-     |
-     +--> build Slurm batch script from Pod spec and annotations
-     |
-     v
-Superfacility API job submission
-     |
-     v
-Slurm queue on Perlmutter
-     |
-     v
-2 GPU nodes allocated
-     |
-     v
-srun launches 8 podman-hpc container ranks
-```
-
-```text
-Kubernetes Job annotations
-  nersc.slurm/account:        "m1234"
-  nersc.slurm/nodes:          "2"
-  nersc.slurm/ntasks:         "8"
-  nersc.slurm/tasks-per-node: "4"
-  nersc.slurm/gpus-per-node:  "4"
-  nersc.slurm/gpus-per-task:  "1"
-  nersc.slurm/launcher:       "srun"
-          |
-          v
-Slurm allocation
-  #SBATCH --account=m1234
-  #SBATCH --nodes=2
-  #SBATCH --ntasks=8
-  #SBATCH --ntasks-per-node=4
-  #SBATCH --gpus-per-node=4
-          |
-          v
-Rank launcher
-  srun --ntasks=8 --ntasks-per-node=4 --cpus-per-task=16 --gpus-per-task=1 podman-hpc run ...
-          |
-          v
-Runtime layout
-  node 1: rank 0 -> GPU 0   rank 1 -> GPU 1   rank 2 -> GPU 2   rank 3 -> GPU 3
-  node 2: rank 4 -> GPU 0   rank 5 -> GPU 1   rank 6 -> GPU 2   rank 7 -> GPU 3
-```
-
-1. The Kubernetes API server stores the `Job`; the Kubernetes Job controller creates a Pod from the job template.
-2. The Kubernetes scheduler sees `nodeSelector.kubernetes.io/hostname: perlmutter-vk` and binds the Pod to the virtual node served by this provider.
-3. Virtual Kubelet calls the NERSC provider's `CreatePod` for that Pod.
-4. The provider reads `nersc.sf/credentialSecretName` from the Pod annotations and loads that Secret from the workload namespace. It exchanges the SFAPI client credentials for a short-lived access token used only for this workload's Superfacility API calls.
-5. The provider translates the Pod into a Slurm batch script. The annotations above render allocation directives for two GPU nodes and a rank launcher equivalent to:
-
-```bash
-srun --ntasks=8 --ntasks-per-node=4 --cpus-per-task=16 --gpus-per-task=1 podman-hpc run --rm registry.example.com/cuda-runtime:latest ...
-```
-
-6. The provider submits the script to the Superfacility API, which submits the job to Slurm on Perlmutter.
-7. Slurm allocates two GPU nodes. `srun` starts eight ranks total, four ranks per node, with one GPU per rank.
-8. Each rank runs the container command and prints its Slurm rank, local rank, `CUDA_VISIBLE_DEVICES`, and visible GPU information.
-9. The provider polls the Superfacility API for job status and maps Slurm state back to Kubernetes Pod phase. `kubectl logs job/perlmutter-gpu-ranks` retrieves the Slurm job logs through the provider.
-
----
-
-## Sidecar Containers
-
-Multi-container pods run as one Slurm job and one `podman-hpc pod` on the allocated compute node. The main container is the first container by default; set `nersc.vk/mainContainer` to choose a different one. Other containers are sidecars, started before the main container and cleaned up when the main container exits.
-
-Do not set `nersc.slurm/launcher: "srun"` for sidecar pods. The rank launcher is for replicated single-container workloads, not supporting services.
-
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: compute-with-sidecar
-  annotations:
-    nersc.slurm/account: "m1234"
-    nersc.sf/credentialSecretName: "sfapi-client"
-    nersc.vk/mainContainer: "worker"
-    nersc.slurm/nodes: "1"
-    nersc.slurm/time: "00:30:00"
-spec:
-  nodeSelector:
-    kubernetes.io/hostname: perlmutter-vk
-  containers:
-  - name: sidecar
-    image: registry.example.com/cache-sidecar:latest
-    command: ["bash", "-lc"]
-    args: ["python -m http.server 9000 --directory /scratch/cache"]
-  - name: worker
-    image: registry.example.com/worker:latest
-    command: ["bash", "-lc"]
-    args: ["curl -fsS http://127.0.0.1:9000/input.dat >/tmp/input.dat && python worker.py"]
-```
-
----
-
-## StatefulSet Usage
-
-StatefulSets are supported with **stable scratch paths** and **per-replica data staging**.
-
-### Example
-```yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: hpc-stateful
-spec:
-  serviceName: "hpc-stateful"
-  replicas: 3
-  selector:
-    matchLabels:
-      app: hpc-stateful
-  template:
-    metadata:
-      labels:
-        app: hpc-stateful
-      annotations:
-        nersc.slurm/account: "m1234"
-        nersc.sf/credentialSecretName: "sfapi-client"
-        nersc.sf/inputSource: "globus://endpoint-id/path/to/data"
-        nersc.sf/outputDest: "globus://endpoint-id/path/to/output"
-        nersc.sf/stageOut: "true"
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: perlmutter-vk
-      containers:
-      - name: compute
-        image: registry.example.com/compute:latest
-        command: ["python"]
-        args: ["compute.py"]
-        volumeMounts:
-        - name: data
-          mountPath: /mnt/data
-      volumes:
-      - name: data
-        persistentVolumeClaim:
-          claimName: hpc-data-pvc
-```
-
----
+StatefulSet scratch paths include the owner name and replica ordinal. See
+[StatefulSet notes](docs/statefulsets.md) and the operating limits above.
 
 ## PVC Integration & Optional Data Staging
 
@@ -458,30 +432,22 @@ Current staging annotations are read from the pod template. PVCs are still suppo
 
 ---
 
-## Examples
+## Repository guide
 
-See the [`examples/`](examples/) directory for:
+| Path | Purpose |
+| --- | --- |
+| `cmd/vk-nersc`, `pkg/provider` | Controllers, credentials, and Pod lifecycle |
+| `pkg/superfacility`, `pkg/scripts` | SFAPI client and Slurm/Podman generation |
+| `cmd/sfapi-probe` | Independent diagnostics and cancellation |
+| `chart/` | Helm chart and environment starting points |
+| `examples/` | Workload templates requiring site values |
+| `docs/dell-lab-deployment.md` | Tested Dell installation details and gaps |
+| `.github/workflows/ci.yaml` | Go tests/build, image publication, chart packaging |
 
-- `sfapi-client-secret.yaml` — per-workload Superfacility client credential Secret
-- `pod-simple.yaml` — basic pod
-- `pod-multi.yaml` — multi-container pod
-- `pod-pvc.yaml` — PVC with data staging
-- `statefulset.yaml` — HPC StatefulSet
-- `job.yaml` — batch job
-- `deploy.yaml` — direct VK deployment without Helm
-
----
-
-## CI/CD
-
-The `.github/workflows/ci.yml` pipeline:
-- Builds Go binary
-- Builds & pushes Docker image
-- Packages Helm chart
-- Optionally publishes Helm chart to GitHub Pages
-
----
+The workflow builds Pull Requests without pushing images; main/manual runs have
+publication steps. Changes to this feature branch have been tested locally/on
+the lab build worker; that does not establish a successful GitHub Actions run.
 
 ## License
 
-MIT 
+MIT

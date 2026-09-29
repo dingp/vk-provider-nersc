@@ -8,6 +8,12 @@ metadata:
 spec:
   nodeSelector:
     kubernetes.io/hostname: perlmutter-vk
+  tolerations:
+  - key: virtual-kubelet.io/provider
+    operator: Equal
+    value: nersc
+    effect: NoSchedule
+  restartPolicy: Never
   containers:
   - name: hello
     image: registry.example.com/hello:latest

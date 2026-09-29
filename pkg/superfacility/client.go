@@ -20,7 +20,8 @@ const maxErrorBodyBytes = 4096
 
 const taskJobRefPrefix = "sfapi-task:"
 
-var slurmJobIDPattern = regexp.MustCompile(`\b[0-9]+(?:_[0-9]+)?\b`)
+var slurmJobIDPattern = regexp.MustCompile(`^[0-9]+(?:_[0-9]+)?$`)
+var submittedJobIDPattern = regexp.MustCompile(`(?i)\bSubmitted batch job ([0-9]+(?:_[0-9]+)?)\b`)
 
 type Client struct {
 	Endpoint string
@@ -320,11 +321,40 @@ func (c *Client) getComputeJobOutput(ctx context.Context, machine, jobID string)
 }
 
 func (c *Client) CancelJob(ctx context.Context, jobID string) error {
-	if _, taskID, ok := parseTaskJobRef(jobID); ok {
-		return c.cancelTask(ctx, taskID)
+	// A submission task is not the Slurm allocation. Wait for its result instead
+	// of deleting it: otherwise completion racing with deletion can orphan a job.
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	machine := "perlmutter"
+	if taskMachine, taskID, ok := parseTaskJobRef(jobID); ok {
+		machine = taskMachine
+		for {
+			task, err := c.getTask(ctx, taskID)
+			if err != nil {
+				return err
+			}
+			if resolved := extractSlurmJobID(task.Result); strings.EqualFold(task.Status, "completed") && resolved != "" {
+				jobID = resolved
+				break
+			}
+			switch strings.ToLower(strings.TrimSpace(task.Status)) {
+			case "completed", "failed", "cancelled", "canceled":
+				return fmt.Errorf("submission task %s ended without a confirmed Slurm job ID; independent reconciliation required", taskID)
+			}
+			if err := waitCancellationPoll(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	status, err := c.getComputeJobStatus(ctx, machine, jobID)
+	if err != nil {
+		return err
+	}
+	if terminalComputeStatus(status) {
+		return nil
 	}
 
-	req, err := c.newRequest(ctx, http.MethodDelete, fmt.Sprintf("compute/jobs/perlmutter/%s", url.PathEscape(jobID)), nil)
+	req, err := c.newRequest(ctx, http.MethodDelete, fmt.Sprintf("compute/jobs/%s/%s", url.PathEscape(machine), url.PathEscape(jobID)), nil)
 	if err != nil {
 		return err
 	}
@@ -335,10 +365,37 @@ func (c *Client) CancelJob(ctx context.Context, jobID string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("cancel failed: %s", responseError(resp))
 	}
-	return nil
+	// Do not discard the provider mapping until accounting confirms termination.
+	for {
+		status, err = c.getComputeJobStatus(ctx, machine, jobID)
+		if err != nil {
+			return err
+		}
+		if terminalComputeStatus(status) {
+			return nil
+		}
+		if err := waitCancellationPoll(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+func waitCancellationPoll(ctx context.Context) error {
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func terminalComputeStatus(status string) bool {
+	return status == "completed" || status == "failed"
 }
 
 func (c *Client) cancelTask(ctx context.Context, taskID string) error {
@@ -687,7 +744,32 @@ func parseTaskJobRef(ref string) (string, string, bool) {
 }
 
 func extractSlurmJobID(result string) string {
-	return slurmJobIDPattern.FindString(result)
+	result = strings.TrimSpace(result)
+	if slurmJobIDPattern.MatchString(result) {
+		return result
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(strings.NewReader(result))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err == nil {
+		if value := payload["error"]; value != nil && value != "" {
+			return ""
+		}
+		if strings.EqualFold(fmt.Sprint(payload["status"]), "error") {
+			return ""
+		}
+		for _, field := range []string{"jobid", "job_id"} {
+			value := fmt.Sprint(payload[field])
+			if slurmJobIDPattern.MatchString(value) {
+				return value
+			}
+		}
+		return ""
+	}
+	if match := submittedJobIDPattern.FindStringSubmatch(result); len(match) == 2 {
+		return match[1]
+	}
+	return ""
 }
 
 func statusFromJobOutput(rows []map[string]string) string {
@@ -746,6 +828,9 @@ func escapeRemotePath(remotePath string) string {
 
 func normalizeSlurmStatus(status string) string {
 	status = strings.ToUpper(strings.TrimSpace(status))
+	if fields := strings.Fields(status); len(fields) > 0 {
+		status = strings.TrimSuffix(fields[0], "+")
+	}
 	switch status {
 	case "PD", "PENDING", "CONFIGURING":
 		return "pending"

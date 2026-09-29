@@ -16,6 +16,34 @@ type fakeBearerTokenSource struct {
 	calls *int32
 }
 
+func TestSecretRotationReplacesCachedSource(t *testing.T) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sfapi-client", Namespace: "tests", ResourceVersion: "1"}, Data: map[string][]byte{"client_id": []byte("first"), "jwk": []byte(`{"kty":"RSA"}`)}}
+	client := fake.NewSimpleClientset(secret)
+	resolver := NewSecretTokenResolver(client.CoreV1())
+	calls := 0
+	resolver.tokenSourceFactory = func(id string, jwk []byte, url string) (bearerTokenSource, error) {
+		calls++
+		return fakeBearerTokenSource{token: id}, nil
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "tests", Annotations: map[string]string{annotationCredentialSecretName: "sfapi-client"}}}
+	for _, want := range []string{"first", "first", "second"} {
+		if want == "second" {
+			secret.ResourceVersion = "2"
+			secret.Data["client_id"] = []byte("second")
+			if _, err := client.CoreV1().Secrets("tests").Update(context.Background(), secret, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := resolver.TokenForPod(context.Background(), pod)
+		if err != nil || got != want {
+			t.Fatalf("got=%s err=%v want=%s", got, err, want)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("source constructions=%d want=2", calls)
+	}
+}
+
 func (s fakeBearerTokenSource) Token(ctx context.Context) (string, error) {
 	if s.calls != nil {
 		atomic.AddInt32(s.calls, 1)

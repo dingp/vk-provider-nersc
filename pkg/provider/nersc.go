@@ -22,16 +22,17 @@ import (
 )
 
 type NerscProvider struct {
-	sfClientFactory      jobClientFactory
-	tokenResolver        TokenResolver
-	nodeName             string
-	nodeAddress          string
-	localTransferRoot    string
-	transferPollInterval time.Duration
-	transferTimeout      time.Duration
-	mu                   sync.RWMutex
-	podMap               map[string]podJobState // podKey -> job state
-	stagingMap           map[string]*podStagingState
+	sfClientFactory       jobClientFactory
+	tokenResolver         TokenResolver
+	nodeName              string
+	nodeAddress           string
+	nodeAddressAsHostname bool
+	localTransferRoot     string
+	transferPollInterval  time.Duration
+	transferTimeout       time.Duration
+	mu                    sync.RWMutex
+	podMap                map[string]podJobState // podKey -> job state
+	stagingMap            map[string]*podStagingState
 }
 
 type jobClientFactory func(token string) jobClient
@@ -151,6 +152,13 @@ func (p *NerscProvider) SetNodeAddress(address string) {
 	if address != "" {
 		p.nodeAddress = address
 	}
+}
+
+// Some distributions reserve Node InternalIPs for their agent tunnels. A numeric
+// Hostname address lets the API server use an independently secured endpoint
+// without registering it as an agent address in those tunnel controllers.
+func (p *NerscProvider) SetNodeAddressAsHostname(enabled bool) {
+	p.nodeAddressAsHostname = enabled
 }
 
 func (p *NerscProvider) SetLocalTransferRoot(root string) {
@@ -597,6 +605,9 @@ func (p *NerscProvider) NodeAddresses(ctx context.Context) []corev1.NodeAddress 
 	address := strings.TrimSpace(p.nodeAddress)
 	if address == "" {
 		address = "127.0.0.1"
+	}
+	if p.nodeAddressAsHostname {
+		return []corev1.NodeAddress{{Type: corev1.NodeHostName, Address: address}}
 	}
 	return []corev1.NodeAddress{
 		{

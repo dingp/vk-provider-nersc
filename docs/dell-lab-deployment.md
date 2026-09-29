@@ -162,7 +162,9 @@ temporary combined key are removed after final reconciliation. Original user key
 files and remote output/image data are retained.
 
 The [reusable CPU examples](../examples/cpu-validation/) include all four workload
-shapes and a renderer with account/QOS/node-count/walltime controls. Rendering all
+shapes as standalone YAML with copyable README commands and editable execution
+annotations. The earlier renderer was removed after the user requested direct
+manifest use. Preparing all
 four with `amsc013/express_amsc` passed Kubernetes server dry-run. These are
 rendering checks; actual live jobs used `nstaff/debug`.
 
@@ -183,7 +185,8 @@ the installation idle, retain its endpoint/certificate and track certificate exp
 
 ## GPU follow-up (2026-09-29)
 
-The [neutral four-GPU example](../examples/gpu-validation/) passed on one
+The [neutral four-GPU example](../examples/gpu-validation/) embeds the tested
+CUDA payload directly in its standalone YAML Job. That payload passed on one
 Perlmutter GPU node. The provider now enables Podman-HPC `--gpu` for explicit
 GPU allocation annotations and forwards GPU visibility plus a fixed list of
 Slurm rank variables through `srun`.

@@ -1,0 +1,141 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  namespace: nersc-vk-tests
+  labels:
+    app: vk-gpu-validation
+  name: REPLACE_WITH_NAME
+spec:
+  backoffLimit: 0
+  parallelism: 1
+  completions: 1
+  template:
+    metadata:
+      labels:
+        app: vk-gpu-validation
+      annotations:
+        nersc.sf/credentialSecretName: sfapi-client
+        nersc.slurm/nodes: '1'
+        nersc.slurm/cpus-per-task: '2'
+        nersc.slurm/mem: 4G
+        nersc.slurm/time: 00:05:00
+        nersc.slurm/constraint: gpu
+        nersc.slurm/account: REPLACE_WITH_ACCOUNT
+        nersc.slurm/qos: REPLACE_WITH_QOS
+        nersc.slurm/gpus-per-node: '4'
+        nersc.slurm/gpus-per-task: '4'
+        nersc.slurm/ntasks: '1'
+        nersc.slurm/launcher: srun
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: perlmutter-vk
+      tolerations:
+        - key: virtual-kubelet.io/provider
+          operator: Equal
+          value: nersc
+          effect: NoSchedule
+      containers:
+        - name: cuda-smoke
+          command:
+            - python3
+            - -u
+            - -c
+          resources:
+            requests:
+              cpu: '2'
+              memory: 4Gi
+          image: docker.io/library/python@sha256:1aaa65a85fda306ffb8b910824d4e93bdce61e212c7e87168123ea3073b41a1a
+          args:
+            - |
+              print('VK_TEST_REPLACE_WITH_NAME', flush=True)
+              """Run a tiny CUDA kernel on each of four allocated GPUs; Python stdlib only."""
+              import ctypes as C
+              import os
+              import subprocess
+
+              print("VK_GPU_SMOKE_START", flush=True)
+              for name in ("SLURM_JOB_ID", "SLURM_PROCID", "CUDA_VISIBLE_DEVICES"):
+                  print(f"{name}={os.environ.get(name, '<unset>')}", flush=True)
+              subprocess.run(["nvidia-smi", "--query-gpu=index,name,uuid", "--format=csv"], check=True)
+              cuda = C.CDLL("libcuda.so.1")
+              P = C.c_void_p
+              U = C.c_uint
+              I = C.c_int
+              D = C.c_uint64
+
+
+              def api(name, types):
+                  fn = getattr(cuda, name)
+                  fn.argtypes = types
+                  fn.restype = I
+
+                  def call(*args):
+                      result = fn(*args)
+                      if result:
+                          raise RuntimeError(f"{name}: CUDA error {result}")
+                  return call
+
+
+              init = api("cuInit", [U])
+              count_devices = api("cuDeviceGetCount", [C.POINTER(I)])
+              get_device = api("cuDeviceGet", [C.POINTER(I), I])
+              get_name = api("cuDeviceGetName", [P, I, I])
+              create_context = api("cuCtxCreate_v2", [C.POINTER(P), U, I])
+              destroy_context = api("cuCtxDestroy_v2", [P])
+              load_module = api("cuModuleLoadData", [C.POINTER(P), P])
+              unload_module = api("cuModuleUnload", [P])
+              get_function = api("cuModuleGetFunction", [C.POINTER(P), P, C.c_char_p])
+              allocate = api("cuMemAlloc_v2", [C.POINTER(D), C.c_size_t])
+              free = api("cuMemFree_v2", [D])
+              launch = api("cuLaunchKernel", [P, U, U, U, U, U, U, U, P, C.POINTER(P), C.POINTER(P)])
+              synchronize = api("cuCtxSynchronize", [])
+              copy_to_host = api("cuMemcpyDtoH_v2", [P, D, C.c_size_t])
+
+              ptx = C.create_string_buffer(b"""
+              .version 6.0
+              .target sm_52
+              .address_size 64
+              .visible .entry add(.param .u64 output) {
+                  .reg .b64 %rd1;
+                  .reg .b32 %r1;
+                  ld.param.u64 %rd1, [output];
+                  mov.u32 %r1, 19;
+                  add.u32 %r1, %r1, 23;
+                  st.global.u32 [%rd1], %r1;
+                  ret;
+              }
+              """)
+              init(0)
+              count = I()
+              count_devices(C.byref(count))
+              if count.value != 4:
+                  raise RuntimeError(f"Expected four visible GPUs, got {count.value}")
+              for index in range(count.value):
+                  device = I()
+                  name = C.create_string_buffer(256)
+                  context, module, function = P(), P(), P()
+                  pointer = D()
+                  get_device(C.byref(device), index)
+                  get_name(name, len(name), device)
+                  create_context(C.byref(context), 0, device)
+                  try:
+                      load_module(C.byref(module), ptx)
+                      get_function(C.byref(function), module, b"add")
+                      allocate(C.byref(pointer), 4)
+                      parameters = (P * 1)(C.cast(C.byref(pointer), P))
+                      launch(function, 1, 1, 1, 1, 1, 1, 0, None, parameters, None)
+                      synchronize()
+                      result = U()
+                      copy_to_host(C.byref(result), pointer, C.sizeof(result))
+                      if result.value != 42:
+                          raise RuntimeError(f"GPU {index}: expected 42, got {result.value}")
+                      print(f"CUDA_GPU_{index}_PASSED name={name.value.decode()} result={result.value}", flush=True)
+                  finally:
+                      if pointer.value:
+                          free(pointer)
+                      if module.value:
+                          unload_module(module)
+                      destroy_context(context)
+              print("GPU_CHECK_PASSED devices=4", flush=True)

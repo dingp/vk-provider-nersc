@@ -206,8 +206,11 @@ job has reached a confirmed terminal state, including during cancellation.
 ## First CPU job
 
 Use the [tested CPU validation examples](examples/cpu-validation/) for successful
-Pod/Job, deliberate failure, and cancellation cases. Their renderer lets you set
-account, QOS, node count, walltime, namespace, and unique workload names.
+Pod/Job, deliberate failure, and cancellation cases. Each is a standalone YAML
+manifest with copyable configuration, submission, monitoring, and cleanup commands
+in its README. The [four-GPU Job](examples/gpu-validation/) embeds its tested CUDA
+payload directly in the manifest. Set account/QOS and a unique name using the
+documented shell commands; edit resource annotations in the YAML.
 
 
 Prepare a digest-pinned image with the same NERSC identity on a login node using

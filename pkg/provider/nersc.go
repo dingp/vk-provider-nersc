@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -73,7 +74,8 @@ const (
 
 type podJobState struct {
 	jobID string
-	pod   *corev1.Pod
+	// pod is an immutable snapshot, also used as this submission's identity.
+	pod *corev1.Pod
 }
 
 type podStagingState struct {
@@ -285,6 +287,9 @@ func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 
 	key := podKey(pod)
 	if state, exists := p.jobStateForPodKey(key); exists {
+		if pod.UID != "" && state.pod != nil && pod.UID != state.pod.UID {
+			return nil // A delayed delete must not cancel a same-name replacement.
+		}
 		client, _, err := p.clientForPodState(ctx, key, &state)
 		if err != nil {
 			return fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
@@ -296,7 +301,7 @@ func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 		}
 
 		p.mu.Lock()
-		if p.podMap[key].jobID == state.jobID {
+		if current, exists := p.podMap[key]; exists && current.pod == state.pod {
 			delete(p.podMap, key)
 			delete(p.stagingMap, key)
 		}
@@ -305,7 +310,9 @@ func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 		log.Printf("Cancelled job %s for pod %s", state.jobID, key)
 	} else {
 		p.mu.Lock()
-		delete(p.stagingMap, key)
+		if _, exists := p.podMap[key]; !exists {
+			delete(p.stagingMap, key)
+		}
 		p.mu.Unlock()
 	}
 	return nil
@@ -352,7 +359,7 @@ func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state
 	// SFAPI submission tasks can expire before their compute jobs do. Retain the
 	// resolved Slurm ID in the provider's existing per-Pod state, across clients
 	// and token refreshes, as soon as a task produces it.
-	if current, ok := p.jobStateForPodKey(key); ok {
+	if current, ok := p.jobStateForPodKey(key); ok && current.pod == state.pod {
 		state.jobID = current.jobID
 	}
 	if resolver, ok := client.(interface {
@@ -365,7 +372,7 @@ func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state
 		}
 		if resolved != original {
 			p.mu.Lock()
-			if current, exists := p.podMap[key]; exists && current.jobID == original {
+			if current, exists := p.podMap[key]; exists && current.pod == state.pod && current.jobID == original {
 				current.jobID = resolved
 				p.podMap[key] = current
 			}
@@ -554,6 +561,10 @@ func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, contain
 	}
 	client, _, err := p.clientForPodState(ctx, key, &state)
 	if err != nil {
+		var unresolved *superfacility.UnresolvedSubmissionError
+		if errors.As(err, &unresolved) {
+			return io.NopCloser(strings.NewReader(unresolved.Result)), nil
+		}
 		return nil, fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 	}
 	if opts != nil && opts.Follow {
@@ -579,6 +590,11 @@ func (p *NerscProvider) followPodLogs(ctx context.Context, client jobClient, job
 		for {
 			status, err := client.GetJobStatus(ctx, jobID)
 			if err != nil {
+				var unresolved *superfacility.UnresolvedSubmissionError
+				if errors.As(err, &unresolved) {
+					_, _ = io.WriteString(writer, unresolved.Result)
+					return
+				}
 				_ = writer.CloseWithError(err)
 				return
 			}

@@ -1,5 +1,5 @@
 ARG GO_IMAGE=golang:1.21
-ARG RUNTIME_IMAGE=debian:bullseye-slim
+ARG RUNTIME_IMAGE=debian:bookworm-slim
 FROM ${GO_IMAGE} AS builder
 WORKDIR /app
 COPY go.mod go.sum ./

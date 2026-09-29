@@ -306,7 +306,12 @@ Run it via `kubectl exec -i` inside the physical provider Pod when testing the
 allowlisted provider egress path. It prints no access tokens. Account checks may
 contain identity/allocation metadata; retain only fields needed for evidence.
 `preflight` inspects scratch, Podman-HPC, and Slurm associations without submitting
-a compute job. `prepare-image` performs image preparation on a login node.
+a compute job. `gpu-preflight ACCOUNT QOS` checks a one-node, four-GPU request with
+`sbatch --test-only`. `prepare-image` performs image preparation on a login node
+and requires a full 64-character SHA256 digest. These command probes exit nonzero
+if the remote command fails or its result does not confirm success; a completed
+SFAPI task alone is insufficient. Successful commands may still print stderr
+(for example, Slurm start estimates).
 
 If the provider crashes, stop controllers, independently query the saved SFAPI
 tasks and Slurm IDs, and cancel only owned jobs. Do not restart and replay tracked
@@ -460,9 +465,9 @@ Current staging annotations are read from the pod template. PVCs are still suppo
 | `examples/` | Workload templates requiring site values |
 | `.github/workflows/ci.yaml` | Go tests/build, image publication, chart packaging |
 
-The workflow builds Pull Requests without pushing images; main/manual runs have
-publication steps. Changes to this feature branch have been tested locally/on
-the lab build worker; that does not establish a successful GitHub Actions run.
+The workflow tests Go packages, builds provider images, and packages the Helm
+chart. Pull requests build without pushing images; main/manual runs have
+publication steps. Check the pull request checks for the current CI result.
 
 ## License
 

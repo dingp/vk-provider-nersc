@@ -2,6 +2,7 @@ package superfacility
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -99,5 +100,60 @@ func TestCancelAlreadyTerminalJobIsIdempotent(t *testing.T) {
 	})
 	if err := client.CancelJob(context.Background(), "12345"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCancelBootFailureAndDeadline(t *testing.T) {
+	for _, state := range []string{"BOOT_FAIL", "BF", "DEADLINE", "DL", "BOOT_FAIL+", "DEADLINE reason"} {
+		for _, initiallyTerminal := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/terminal=%v", state, initiallyTerminal), func(t *testing.T) {
+				deletes := 0
+				client := newTestClient(func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodDelete {
+						deletes++
+						return response(202, `{"status":"OK"}`), nil
+					}
+					status := state
+					if !initiallyTerminal && deletes == 0 {
+						status = "RUNNING"
+					}
+					return response(200, `{"status":"OK","output":[{"State":"`+status+`"}]}`), nil
+				})
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				if err := client.CancelJob(ctx, "12345"); err != nil {
+					t.Fatal(err)
+				}
+				want := 1
+				if initiallyTerminal {
+					want = 0
+				}
+				if deletes != want {
+					t.Fatalf("deletes=%d want %d", deletes, want)
+				}
+				status, err := client.GetJobStatus(ctx, "12345")
+				if err != nil || status != "failed" {
+					t.Fatalf("status=%s error=%v", status, err)
+				}
+			})
+		}
+	}
+}
+
+func TestCancelRetainsRequeuedOrUnknownJobs(t *testing.T) {
+	for _, state := range []string{"REQUEUED", "REQUEUE_HOLD", "PENDING", "UNKNOWN"} {
+		t.Run(state, func(t *testing.T) {
+			client := newTestClient(func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodDelete {
+					return response(202, `{"status":"OK"}`), nil
+				}
+				return response(200, `{"status":"OK","output":[{"State":"`+state+`"}]}`), nil
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			if err := client.CancelJob(ctx, "12345"); err == nil {
+				t.Fatal("nonterminal cancellation accepted")
+			}
+		})
 	}
 }

@@ -205,6 +205,18 @@ func (c *Client) SubmitJob(ctx context.Context, req JobSubmissionRequest) (strin
 	return makeTaskJobRef(req.System, out.TaskID), nil
 }
 
+// UnresolvedSubmissionError preserves diagnostics for a completed submission whose
+// result does not establish a Slurm ID. Logs may return Result; cancellation must
+// still retain tracking until the submission is independently reconciled.
+type UnresolvedSubmissionError struct {
+	TaskID string
+	Result string
+}
+
+func (e *UnresolvedSubmissionError) Error() string {
+	return fmt.Sprintf("task %s completed without a confirmed Slurm job ID", e.TaskID)
+}
+
 // ResolveJobID returns the real Slurm ID when a Perlmutter submission task has
 // completed. Pending tasks keep their reference. Callers must retain the resolved
 // ID because the SFAPI task record can disappear independently of the Slurm job.
@@ -225,7 +237,7 @@ func (c *Client) ResolveJobID(ctx context.Context, jobID string) (string, error)
 	}
 	resolved := extractSlurmJobID(task.Result)
 	if resolved == "" {
-		return "", fmt.Errorf("task %s completed without a confirmed Slurm job ID", taskID)
+		return "", &UnresolvedSubmissionError{TaskID: taskID, Result: task.Result}
 	}
 	return resolved, nil
 }
@@ -250,7 +262,7 @@ func (c *Client) getTaskBackedJobStatus(ctx context.Context, machine, taskID str
 	case "completed":
 		slurmJobID := extractSlurmJobID(task.Result)
 		if slurmJobID == "" {
-			return "", fmt.Errorf("task %s completed but result did not contain a Slurm job id: %q", taskID, task.Result)
+			return "", &UnresolvedSubmissionError{TaskID: taskID, Result: task.Result}
 		}
 		return c.getComputeJobStatus(ctx, machine, slurmJobID)
 	default:
@@ -863,7 +875,7 @@ func normalizeSlurmStatus(status string) string {
 		return "running"
 	case "CD", "COMPLETED", "COMPLETED+":
 		return "completed"
-	case "F", "FAILED", "CA", "CANCELLED", "CANCELED", "TO", "TIMEOUT", "NF", "NODE_FAIL", "OOM", "OUT_OF_MEMORY":
+	case "F", "FAILED", "CA", "CANCELLED", "CANCELED", "TO", "TIMEOUT", "NF", "NODE_FAIL", "OOM", "OUT_OF_MEMORY", "BF", "BOOT_FAIL", "DL", "DEADLINE":
 		return "failed"
 	default:
 		return strings.ToLower(status)

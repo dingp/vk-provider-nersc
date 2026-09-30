@@ -497,4 +497,5 @@ publication steps. Check the pull request checks for the current CI result.
 
 ## License
 
-MIT
+Licensed under [BSD-3-Clause-LBNL](LICENSE) (Lawrence Berkeley National Labs BSD
+variant license).

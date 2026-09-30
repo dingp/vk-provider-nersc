@@ -64,7 +64,7 @@ func TestCancellationResolutionSurvivesErrorsAndTaskExpiry(t *testing.T) {
 					if stopped.Load() {
 						state = "CANCELLED"
 					}
-					fmt.Fprintf(w, `{"status":"OK","output":[{"state":%q,"workdir":"/scratch","jobname":"test"}]}`, state)
+					fmt.Fprintf(w, `{"status":"OK","output":[{"jobid":"12345","state":%q,"workdir":"/scratch","jobname":"test"}]}`, state)
 				case "/utilities/download/perlmutter//scratch/test.out":
 					fmt.Fprint(w, `{"status":"OK","file":"retained logs","is_binary":false}`)
 				default:

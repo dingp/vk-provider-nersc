@@ -93,7 +93,7 @@ func TestOperationResolutionSurvivesTaskExpiry(t *testing.T) {
 						if stopped.Load() {
 							state = "CANCELLED"
 						}
-						fmt.Fprintf(w, `{"status":"OK","output":[{"state":%q,"workdir":"/scratch","jobname":"test"}]}`, state)
+						fmt.Fprintf(w, `{"status":"OK","output":[{"jobid":"12345_7","state":%q,"workdir":"/scratch","jobname":"test"}]}`, state)
 					case "/utilities/download/perlmutter//scratch/test.out":
 						if id, _ := p.jobIDForPodKey(key); id != "12345_7" {
 							t.Errorf("download preceded retention: %q", id)

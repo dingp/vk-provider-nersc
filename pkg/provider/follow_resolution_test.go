@@ -57,7 +57,7 @@ func TestFollowResolutionSurvivesTaskExpiry(t *testing.T) {
 					} else if !failAccounting && n > 1 {
 						state = "COMPLETED"
 					}
-					fmt.Fprintf(w, `{"status":"OK","output":[{"state":%q,"workdir":"/scratch","jobname":"test"}]}`, state)
+					fmt.Fprintf(w, `{"status":"OK","output":[{"jobid":"12345_7","state":%q,"workdir":"/scratch","jobname":"test"}]}`, state)
 				case "/utilities/download/perlmutter//scratch/test.out":
 					fmt.Fprint(w, `{"status":"OK","file":"followed retained logs","is_binary":false}`)
 				default:

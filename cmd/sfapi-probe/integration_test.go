@@ -88,7 +88,7 @@ func TestProbeUsesConfiguredEndpoint(t *testing.T) {
 						t.Error("missing synthetic bearer token")
 					}
 					if strings.HasSuffix(r.URL.Path, "/compute/jobs/perlmutter/12345_7") {
-						body = `{"status":"OK","output":[{"state":"COMPLETED"}]}`
+						body = `{"status":"OK","output":[{"jobid":"12345_7","state":"COMPLETED"}]}`
 					}
 				}
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil

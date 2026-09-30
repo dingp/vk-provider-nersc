@@ -403,11 +403,12 @@ func (c *Client) CancelJobWithResolution(ctx context.Context, jobID string, onRe
 	if onResolved != nil {
 		onResolved(jobID)
 	}
-	status, err := c.getComputeJobStatus(ctx, machine, jobID)
+	accounting := cancellationAccounting{jobID: jobID, observed: make(map[string]struct{})}
+	confirmed, err := c.confirmCancellation(ctx, machine, &accounting)
 	if err != nil {
 		return err
 	}
-	if terminalComputeStatus(status) {
+	if confirmed {
 		return nil
 	}
 
@@ -427,11 +428,11 @@ func (c *Client) CancelJobWithResolution(ctx context.Context, jobID string, onRe
 	}
 	// Do not discard the provider mapping until accounting confirms termination.
 	for {
-		status, err = c.getComputeJobStatus(ctx, machine, jobID)
+		confirmed, err = c.confirmCancellation(ctx, machine, &accounting)
 		if err != nil {
 			return err
 		}
-		if terminalComputeStatus(status) {
+		if confirmed {
 			return nil
 		}
 		if err := waitCancellationPoll(ctx); err != nil {

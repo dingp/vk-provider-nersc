@@ -253,6 +253,11 @@ compute NodeList and terminal state, deterministic stdout, Pod success, and Job
 completion. Set a submission budget and queue timeout before tests; a timeout is
 inconclusive until all remote work is reconciled. Never repeat an ambiguous create.
 
+Cancellation confirms all selected Slurm allocation records, including every
+returned array element when given a parent ID. Empty, unidentified, unknown, or
+incomplete accounting remains unconfirmed; retain tracking and reconcile remote
+work independently after an error. Job-step records alone cannot prove shutdown.
+
 ## Operating limits
 
 - One provider replica, `Recreate`, and no in-flight restart/failover recovery.

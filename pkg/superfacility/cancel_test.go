@@ -40,9 +40,9 @@ func TestCancelTaskBackedJobResolvesAndConfirmsSlurmCancellation(t *testing.T) {
 				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/compute/jobs/perlmutter/12345"):
 					jobReads++
 					if deletes == 0 {
-						return response(200, `{"status":"OK","output":[{"State":"RUNNING"}]}`), nil
+						return response(200, `{"status":"OK","output":[{"jobid":"12345","State":"RUNNING"}]}`), nil
 					}
-					return response(200, `{"status":"OK","output":[{"State":"CANCELLED"}]}`), nil
+					return response(200, `{"status":"OK","output":[{"jobid":"12345","State":"CANCELLED"}]}`), nil
 				case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/compute/jobs/perlmutter/12345"):
 					deletes++
 					return response(202, `{"status":"OK"}`), nil
@@ -82,7 +82,7 @@ func TestCancelRequiresTerminalAccounting(t *testing.T) {
 		if r.Method == http.MethodDelete {
 			return response(200, `{"status":"OK"}`), nil
 		}
-		return response(200, `{"status":"OK","output":[{"State":"RUNNING"}]}`), nil
+		return response(200, `{"status":"OK","output":[{"jobid":"12345","State":"RUNNING"}]}`), nil
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -96,7 +96,7 @@ func TestCancelAlreadyTerminalJobIsIdempotent(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Fatal("terminal allocation needs no DELETE")
 		}
-		return response(200, `{"status":"OK","output":[{"State":"COMPLETED"}]}`), nil
+		return response(200, `{"status":"OK","output":[{"jobid":"12345","State":"COMPLETED"}]}`), nil
 	})
 	if err := client.CancelJob(context.Background(), "12345"); err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestCancelBootFailureAndDeadline(t *testing.T) {
 					if !initiallyTerminal && deletes == 0 {
 						status = "RUNNING"
 					}
-					return response(200, `{"status":"OK","output":[{"State":"`+status+`"}]}`), nil
+					return response(200, `{"status":"OK","output":[{"jobid":"12345","State":"`+status+`"}]}`), nil
 				})
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
@@ -147,7 +147,7 @@ func TestCancelRetainsRequeuedOrUnknownJobs(t *testing.T) {
 				if r.Method == http.MethodDelete {
 					return response(202, `{"status":"OK"}`), nil
 				}
-				return response(200, `{"status":"OK","output":[{"State":"`+state+`"}]}`), nil
+				return response(200, `{"status":"OK","output":[{"jobid":"12345","State":"`+state+`"}]}`), nil
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()

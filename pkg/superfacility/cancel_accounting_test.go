@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,7 +35,7 @@ func TestCancelArrayMixedAccountingRequiresDelete(t *testing.T) {
 			if err := client.CancelJob(ctx, "12345"); err != nil {
 				t.Fatal(err)
 			}
-			if deletes != 1 || reads != 2 {
+			if deletes != 1 || reads != 3 {
 				t.Fatalf("mixed array requires DELETE and terminal recheck: deletes=%d reads=%d", deletes, reads)
 			}
 		})
@@ -102,7 +103,11 @@ func TestCancelAccountingSelectsTerminalAllocations(t *testing.T) {
 			if err := client.CancelJob(ctx, tc.jobID); err != nil {
 				t.Fatal(err)
 			}
-			if reads != 1 || deletes != 0 {
+			wantReads := 1
+			if tc.name == "all array elements terminal" {
+				wantReads = 2 // Singular discovery followed by full allocation accounting.
+			}
+			if reads != wantReads || deletes != 0 {
 				t.Fatalf("terminal allocation cancellation should be idempotent: reads=%d deletes=%d", reads, deletes)
 			}
 		})
@@ -192,7 +197,7 @@ func TestCancelAccountingWaitsUntilEveryArrayElementTerminates(t *testing.T) {
 		if deletes > 0 {
 			rows[0]["state"] = "CANCELLED"
 		}
-		if reads >= 3 {
+		if reads >= 4 {
 			rows[1]["state"] = "CANCELLED"
 		}
 		return rows
@@ -202,7 +207,7 @@ func TestCancelAccountingWaitsUntilEveryArrayElementTerminates(t *testing.T) {
 	if err := client.CancelJob(ctx, "12345"); err != nil {
 		t.Fatal(err)
 	}
-	if deletes != 1 || reads != 3 {
+	if deletes != 1 || reads != 4 {
 		t.Fatalf("must wait through mixed confirmation to all-terminal accounting: deletes=%d reads=%d", deletes, reads)
 	}
 }
@@ -222,6 +227,37 @@ func TestCancelRejectsArrayTaskAsRawAlias(t *testing.T) {
 func cancellationAccountingClient(t *testing.T, jobID string, reads, deletes *int, rows func() []map[string]string) *Client {
 	t.Helper()
 	return newTestClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/api/v1.2/utilities/command/perlmutter" && r.Method == http.MethodPost {
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			want := "LC_ALL=C sacct --noheader --parsable2 --allocations --array --jobs=" + jobID + " --format=JobID%64,JobIDRaw%64,State%64"
+			if r.Form.Get("executable") != want {
+				t.Fatalf("unexpected accounting command: %q", r.Form.Get("executable"))
+			}
+			return response(http.StatusOK, `{"status":"OK","task_id":"accounting"}`), nil
+		}
+		if r.URL.Path == "/api/v1.2/tasks/accounting" && r.Method == http.MethodGet {
+			*reads++
+			var output strings.Builder
+			for i, row := range rows() {
+				id := firstNonEmpty(row["jobid"], row["JobID"])
+				raw := firstNonEmpty(row["jobidraw"], row["JobIDRaw"])
+				if raw == "" {
+					raw = fmt.Sprint(90000 + i)
+				}
+				fmt.Fprintf(&output, "%s|%s|%s\n", id, raw, firstNonEmpty(row["state"], row["State"]))
+			}
+			result, err := json.Marshal(map[string]any{"status": "ok", "exit_code": 0, "output": output.String()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(map[string]any{"status": "completed", "result": string(result)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return response(http.StatusOK, string(body)), nil
+		}
 		if r.URL.Path != "/api/v1.2/compute/jobs/perlmutter/"+jobID {
 			t.Fatalf("unexpected cancellation path: %s", r.URL.Path)
 		}

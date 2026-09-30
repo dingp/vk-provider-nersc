@@ -253,10 +253,14 @@ compute NodeList and terminal state, deterministic stdout, Pod success, and Job
 completion. Set a submission budget and queue timeout before tests; a timeout is
 inconclusive until all remote work is reconciled. Never repeat an ambiguous create.
 
-Cancellation confirms all selected Slurm allocation records, including every
-returned array element when given a parent ID. Empty, unidentified, unknown, or
-incomplete accounting remains unconfirmed; retain tracking and reconcile remote
-work independently after an error. Job-step records alone cannot prove shutdown.
+Cancellation confirms all selected Slurm allocation records. When a numeric
+ID is identified as an array parent, it uses an expanded `sacct` allocation query
+through SFAPI command execution because a singular job response may omit elements.
+This parent-array path requires command-execution permission (RED scope); command
+errors never fall back to the incomplete response. Ordinary jobs and exact array
+tasks keep their direct accounting path. Empty, unidentified, unknown, or incomplete
+accounting remains unconfirmed; retain tracking and reconcile remote work
+independently after an error. Job-step records alone cannot prove shutdown.
 
 ## Operating limits
 

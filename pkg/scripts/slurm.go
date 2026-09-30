@@ -2,6 +2,7 @@ package scripts
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,6 +27,8 @@ const (
 	annotationQOS          = "nersc.slurm/qos"
 	annotationConstraint   = "nersc.slurm/constraint"
 	annotationAccount      = "nersc.slurm/account"
+	annotationWorkDir      = "nersc.slurm/workdir"
+	annotationOutput       = "nersc.slurm/output"
 
 	launcherNone = "none"
 	launcherSrun = "srun"
@@ -39,6 +42,7 @@ var (
 type slurmOptions struct {
 	JobName      string
 	Output       string
+	WorkDir      string
 	Nodes        int
 	NTasks       int
 	TasksPerNode int
@@ -192,6 +196,12 @@ func slurmOptionsFromPod(pod *corev1.Pod) (slurmOptions, error) {
 	if opts.Account, err = safeStringAnnotation(pod, annotationAccount, "", safeSlurmValuePattern); err != nil {
 		return slurmOptions{}, err
 	}
+	if opts.WorkDir, err = safeStringAnnotation(pod, annotationWorkDir, "", safeSlurmValuePattern); err != nil {
+		return slurmOptions{}, err
+	}
+	if opts.Output, err = safeStringAnnotation(pod, annotationOutput, opts.Output, safeSlurmValuePattern); err != nil {
+		return slurmOptions{}, err
+	}
 	return opts, nil
 }
 
@@ -228,6 +238,9 @@ func renderSlurmDirectives(opts slurmOptions) string {
 	}
 	if opts.Account != "" {
 		lines = append(lines, fmt.Sprintf("#SBATCH --account=%s", opts.Account))
+	}
+	if opts.WorkDir != "" {
+		lines = append(lines, fmt.Sprintf("#SBATCH --chdir=%s", opts.WorkDir))
 	}
 	lines = append(lines, fmt.Sprintf("#SBATCH --output=%s", opts.Output))
 	return strings.Join(lines, "\n")
@@ -313,6 +326,20 @@ func annotationValue(pod *corev1.Pod, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(pod.Annotations[key])
+}
+
+func OutputPathForPod(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	opts, err := slurmOptionsFromPod(pod)
+	if err != nil {
+		return ""
+	}
+	if opts.WorkDir != "" && !path.IsAbs(opts.Output) {
+		return path.Join(opts.WorkDir, opts.Output)
+	}
+	return opts.Output
 }
 
 func containerRunCommand(c corev1.Container, volPaths map[string]string, inPod bool) string {

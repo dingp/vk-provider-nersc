@@ -15,8 +15,11 @@ spec:
       annotations:
         nersc.slurm/account: "m1234"
         nersc.sf/credentialSecretName: "sfapi-client"
-        nersc.sf/inputSource: "globus://endpoint-id/path/to/data"
+        nersc.sf/scratchBase: "/pscratch/sd/a/alice/vk-provider-nersc"
+        globus.api/inputSource: "globus://source-collection-id/path/to/data"
         nersc.sf/inputVolume: "data"
+        globus.api/credentialSecretName: "globus-client"
+        globus.api/stagingCollectionID: "nersc-collection-id"
     spec:
       nodeSelector:
         kubernetes.io/hostname: perlmutter-vk

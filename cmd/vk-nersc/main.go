@@ -70,6 +70,7 @@ func main() {
 	}
 	prov.SetNodeAddress(nodeAddress)
 	prov.SetLocalTransferRoot(localTransferRoot)
+	prov.SetGlobusClientResolver(provider.NewSecretGlobusClientResolver(clientset.CoreV1()))
 
 	// Create the virtual node
 	virtualNode := &corev1.Node{

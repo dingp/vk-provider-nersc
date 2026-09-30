@@ -41,10 +41,14 @@ statefulset:
   credentialSecretName: sfapi-client
   credentialSecretKey: sf_api.json
   transferMode: globus
-  scratchBase: ""
-  inputSource: "globus://endpoint-id/path/to/data"
+  scratchBase: "/pscratch/sd/a/alice/vk-provider-nersc"
+  globusCredentialSecretName: globus-client
+  globusCredentialSecretKey: globus.json
+  globusStagingCollectionID: nersc-collection-id
+  globusScope: ""
+  inputSource: "globus://source-collection-id/path/to/data"
   inputVolume: data
-  outputDest: "globus://endpoint-id/path/to/output"
+  outputDest: "globus://destination-collection-id/path/to/output"
   outputVolume: data
   stageOut: "true"
   nodeSelector: perlmutter-vk

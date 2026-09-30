@@ -122,14 +122,14 @@ func TestSecretTokenResolverReadsSeparateClientIDAndJWKKeys(t *testing.T) {
 	}
 }
 
-func TestSecretTokenResolverStillSupportsLegacyRawTokenSecret(t *testing.T) {
+func TestSecretTokenResolverReadsRawBearerTokenSecret(t *testing.T) {
 	client := fake.NewSimpleClientset(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sf-job-token",
 			Namespace: "workloads",
 		},
 		Data: map[string][]byte{
-			"token": []byte(" job-token \n"),
+			"bearer_token": []byte(" job-token \n"),
 		},
 	})
 	resolver := NewSecretTokenResolver(client.CoreV1())
@@ -149,6 +149,107 @@ func TestSecretTokenResolverStillSupportsLegacyRawTokenSecret(t *testing.T) {
 	}
 	if token != "job-token" {
 		t.Fatalf("token = %q, want job-token", token)
+	}
+}
+
+func TestSecretTokenResolverReadsSFAPIBearerTokenKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "bearer token", key: defaultBearerTokenSecretKey},
+		{name: "deprecated token key", key: legacyTokenSecretKey},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewSimpleClientset(&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "sfapi-bearer", Namespace: "workloads"},
+				Data:       map[string][]byte{tt.key: []byte(" sfapi-access-token ")},
+			})
+			resolver := NewSecretTokenResolver(client.CoreV1())
+			resolver.tokenSourceFactory = func(string, []byte, string) (bearerTokenSource, error) {
+				t.Fatal("client credential token source should not be created")
+				return nil, nil
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "demo", Namespace: "workloads",
+				Annotations: map[string]string{annotationCredentialSecretName: "sfapi-bearer"},
+			}}
+
+			token, err := resolver.TokenForPod(context.Background(), pod)
+			if err != nil {
+				t.Fatalf("TokenForPod returned error: %v", err)
+			}
+			if token != "sfapi-access-token" {
+				t.Fatalf("token = %q", token)
+			}
+		})
+	}
+}
+
+func TestSecretTokenResolverPrefersBearerTokenOverDeprecatedTokenKey(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sf-job-token", Namespace: "workloads"},
+		Data: map[string][]byte{
+			defaultBearerTokenSecretKey: []byte("bearer-token"),
+			legacyTokenSecretKey:        []byte("legacy-token"),
+		},
+	})
+	resolver := NewSecretTokenResolver(client.CoreV1())
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "demo", Namespace: "workloads",
+		Annotations: map[string]string{annotationTokenSecretName: "sf-job-token"},
+	}}
+
+	token, err := resolver.TokenForPod(context.Background(), pod)
+	if err != nil {
+		t.Fatalf("TokenForPod returned error: %v", err)
+	}
+	if token != "bearer-token" {
+		t.Fatalf("token = %q, want bearer-token", token)
+	}
+}
+
+func TestSecretTokenResolverRejectsBearerTokenInsideCredentialJSON(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sfapi-bearer", Namespace: "workloads"},
+		Data: map[string][]byte{
+			defaultCredentialSecretKey: []byte(`{"bearer_token":"sfapi-access-token"}`),
+		},
+	})
+	resolver := NewSecretTokenResolver(client.CoreV1())
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "demo", Namespace: "workloads",
+		Annotations: map[string]string{annotationCredentialSecretName: "sfapi-bearer"},
+	}}
+
+	_, err := resolver.TokenForPod(context.Background(), pod)
+	if err == nil || !strings.Contains(err.Error(), `missing client_id`) {
+		t.Fatalf("error = %v, want missing client_id error because sf_api.json holds client credentials only", err)
+	}
+}
+
+func TestSecretTokenResolverReadsRawBearerTokenFromRequestedCredentialKey(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sfapi-bearer", Namespace: "workloads"},
+		Data:       map[string][]byte{"my-token": []byte("sfapi-access-token")},
+	})
+	resolver := NewSecretTokenResolver(client.CoreV1())
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "demo", Namespace: "workloads",
+		Annotations: map[string]string{
+			annotationCredentialSecretName: "sfapi-bearer",
+			annotationCredentialSecretKey:  "my-token",
+		},
+	}}
+
+	token, err := resolver.TokenForPod(context.Background(), pod)
+	if err != nil {
+		t.Fatalf("TokenForPod returned error: %v", err)
+	}
+	if token != "sfapi-access-token" {
+		t.Fatalf("token = %q", token)
 	}
 }
 
@@ -197,13 +298,13 @@ func TestSecretTokenResolverReportsMissingTokenKey(t *testing.T) {
 			Namespace: "workloads",
 			Annotations: map[string]string{
 				annotationTokenSecretName: "sf-job-token",
-				annotationTokenSecretKey:  "token",
+				annotationTokenSecretKey:  "bearer_token",
 			},
 		},
 	}
 
 	_, err := resolver.TokenForPod(context.Background(), pod)
-	if err == nil || !strings.Contains(err.Error(), `missing key "token"`) {
+	if err == nil || !strings.Contains(err.Error(), `missing key "bearer_token"`) {
 		t.Fatalf("error = %v, want missing key error", err)
 	}
 }
@@ -215,7 +316,7 @@ func TestSecretTokenResolverReportsEmptyToken(t *testing.T) {
 			Namespace: "workloads",
 		},
 		Data: map[string][]byte{
-			"token": []byte(" \n"),
+			"bearer_token": []byte(" \n"),
 		},
 	})
 	resolver := NewSecretTokenResolver(client.CoreV1())
@@ -230,7 +331,7 @@ func TestSecretTokenResolverReportsEmptyToken(t *testing.T) {
 	}
 
 	_, err := resolver.TokenForPod(context.Background(), pod)
-	if err == nil || !strings.Contains(err.Error(), `key "token" is empty`) {
+	if err == nil || !strings.Contains(err.Error(), `key "bearer_token" is empty`) {
 		t.Fatalf("error = %v, want empty token error", err)
 	}
 }

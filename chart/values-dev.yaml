@@ -44,7 +44,11 @@ statefulset:
   credentialSecretName: sfapi-client
   credentialSecretKey: sf_api.json
   transferMode: globus
-  scratchBase: ""
+  scratchBase: "/pscratch/sd/a/alice/vk-provider-nersc"
+  globusCredentialSecretName: globus-client
+  globusCredentialSecretKey: globus.json
+  globusStagingCollectionID: nersc-collection-id
+  globusScope: ""
   inputSource: ""
   inputVolume: data
   outputDest: ""

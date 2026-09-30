@@ -27,11 +27,31 @@ spec:
 {{- with .Values.statefulset.scratchBase }}
         nersc.sf/scratchBase: "{{ . }}"
 {{- end }}
+{{- with .Values.statefulset.globusCredentialSecretName }}
+        globus.api/credentialSecretName: "{{ . }}"
+{{- end }}
+{{- with .Values.statefulset.globusCredentialSecretKey }}
+        globus.api/credentialSecretKey: "{{ . }}"
+{{- end }}
+{{- with .Values.statefulset.globusStagingCollectionID }}
+        globus.api/stagingCollectionID: "{{ . }}"
+{{- end }}
+{{- with .Values.statefulset.globusScope }}
+        globus.api/scope: "{{ . }}"
+{{- end }}
+{{- if eq (default "globus" .Values.statefulset.transferMode) "globus" }}
+        globus.api/inputSource: "{{ .Values.statefulset.inputSource }}"
+{{- else }}
         nersc.sf/inputSource: "{{ .Values.statefulset.inputSource }}"
+{{- end }}
 {{- with .Values.statefulset.inputVolume }}
         nersc.sf/inputVolume: "{{ . }}"
 {{- end }}
+{{- if eq (default "globus" .Values.statefulset.transferMode) "globus" }}
+        globus.api/outputDest: "{{ .Values.statefulset.outputDest }}"
+{{- else }}
         nersc.sf/outputDest: "{{ .Values.statefulset.outputDest }}"
+{{- end }}
 {{- with .Values.statefulset.outputVolume }}
         nersc.sf/outputVolume: "{{ . }}"
 {{- end }}

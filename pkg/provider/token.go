@@ -23,7 +23,11 @@ const (
 	defaultJWKSecretKey        = "jwk"
 	defaultSecretJWKKey        = "secret"
 
-	defaultTokenSecretKey = "token"
+	defaultBearerTokenSecretKey = "bearer_token"
+
+	// legacyTokenSecretKey is the deprecated implicit raw-token key, still
+	// checked after defaultBearerTokenSecretKey for pre-bearer_token Secrets.
+	legacyTokenSecretKey = "token"
 )
 
 type bearerTokenSource interface {
@@ -109,7 +113,7 @@ func (r *SecretTokenResolver) TokenForPod(ctx context.Context, pod *corev1.Pod) 
 		return r.tokenForCredential(ctx, namespace, secret, credential)
 	}
 
-	if token, ok, tokenErr := legacyTokenFromSecret(secret, secretKey); ok || tokenErr != nil {
+	if token, ok, tokenErr := bearerTokenFromSecret(secret, secretKey); ok || tokenErr != nil {
 		if tokenErr != nil {
 			return "", tokenErr
 		}
@@ -237,18 +241,45 @@ func normalizeJWKJSON(raw json.RawMessage) ([]byte, error) {
 	return raw, nil
 }
 
-func legacyTokenFromSecret(secret *corev1.Secret, requestedKey string) (string, bool, error) {
-	key := requestedKey
-	if key == "" {
-		key = defaultTokenSecretKey
+func bearerTokenFromSecret(secret *corev1.Secret, requestedKey string) (string, bool, error) {
+	if secret == nil {
+		return "", false, fmt.Errorf("Superfacility credential secret is required")
 	}
-	tokenBytes, ok := secret.Data[key]
-	if !ok {
+	if requestedKey != "" {
+		data, ok := secret.Data[requestedKey]
+		if !ok {
+			return "", false, nil
+		}
+		return bearerTokenFromData(secret, requestedKey, data)
+	}
+
+	if data, ok := secret.Data[defaultBearerTokenSecretKey]; ok {
+		return validateBearerToken(secret, defaultBearerTokenSecretKey, string(data))
+	}
+	// Deprecated: the implicit raw-token key before bearer_token. Pods using the
+	// legacy nersc.sf/tokenSecretName annotation relied on this, so keep it as a
+	// fallback instead of failing with a client-credential error.
+	if data, ok := secret.Data[legacyTokenSecretKey]; ok {
+		return validateBearerToken(secret, legacyTokenSecretKey, string(data))
+	}
+	return "", false, nil
+}
+
+func bearerTokenFromData(secret *corev1.Secret, key string, data []byte) (string, bool, error) {
+	if json.Valid(data) {
+		var token string
+		if json.Unmarshal(data, &token) == nil {
+			return validateBearerToken(secret, key, token)
+		}
 		return "", false, nil
 	}
-	token := strings.TrimSpace(string(tokenBytes))
+	return validateBearerToken(secret, key, string(data))
+}
+
+func validateBearerToken(secret *corev1.Secret, key, raw string) (string, bool, error) {
+	token := strings.TrimSpace(raw)
 	if token == "" {
-		return "", true, fmt.Errorf("Superfacility token secret %s/%s key %q is empty", secret.Namespace, secret.Name, key)
+		return "", true, fmt.Errorf("Superfacility bearer token secret %s/%s key %q is empty", secret.Namespace, secret.Name, key)
 	}
 	return token, true, nil
 }

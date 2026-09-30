@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	globusapi "vk-provider-nersc/pkg/globus"
 	"vk-provider-nersc/pkg/scripts"
 	"vk-provider-nersc/pkg/superfacility"
 )
@@ -24,6 +26,7 @@ import (
 type NerscProvider struct {
 	sfClientFactory      jobClientFactory
 	tokenResolver        TokenResolver
+	globusClientResolver GlobusClientResolver
 	nodeName             string
 	nodeAddress          string
 	localTransferRoot    string
@@ -44,8 +47,6 @@ type jobClient interface {
 	UploadFile(context.Context, string, string, string, io.Reader) error
 	RunCommand(context.Context, string, string) (string, error)
 	DownloadFile(context.Context, string, string) ([]byte, error)
-	StartGlobusTransfer(context.Context, superfacility.GlobusTransferRequest) (superfacility.GlobusTransfer, error)
-	CheckGlobusTransfer(context.Context, string) (superfacility.GlobusTransferResult, error)
 }
 
 type TokenResolver interface {
@@ -55,6 +56,8 @@ type TokenResolver interface {
 const (
 	defaultTransferPollInterval = 15 * time.Second
 	defaultTransferTimeout      = 30 * time.Minute
+
+	perlmutterMachine = "perlmutter"
 
 	annotationTokenSecretName = "nersc.sf/tokenSecretName"
 	annotationTokenSecretKey  = "nersc.sf/tokenSecretKey"
@@ -67,7 +70,6 @@ const (
 	annotationStageVolume     = "nersc.sf/stageVolume"
 	annotationInputVolume     = "nersc.sf/inputVolume"
 	annotationOutputVolume    = "nersc.sf/outputVolume"
-	annotationGlobusUsername  = "nersc.sf/globusUsername"
 )
 
 type podJobState struct {
@@ -85,7 +87,7 @@ type podStagingState struct {
 	outputTransferID string
 	outputStatus     transferStatus
 	outputError      string
-	outputRequest    *superfacility.GlobusTransferRequest
+	outputRequest    *globusapi.TransferRequest
 	outputDest       *globusLocation
 	outputLocalPath  string
 	outputSourceDir  string
@@ -160,6 +162,10 @@ func (p *NerscProvider) SetLocalTransferRoot(root string) {
 	}
 }
 
+func (p *NerscProvider) SetGlobusClientResolver(resolver GlobusClientResolver) {
+	p.globusClientResolver = resolver
+}
+
 func VirtualNodeLabels(nodeName string) map[string]string {
 	return map[string]string{
 		"type":                   "virtual-kubelet",
@@ -223,6 +229,23 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 		}
 	}
 
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	if pod.Annotations["nersc.slurm/output"] == "" {
+		pod.Annotations["nersc.slurm/output"] = pod.Name + ".out"
+	}
+	if pod.Annotations["nersc.slurm/workdir"] == "" && path.IsAbs(jobScratchBase) && !strings.Contains(jobScratchBase, "$") {
+		// Slurm applies --chdir before the batch script runs, so the in-script
+		// volume setup cannot create this directory first. Stage-in may have
+		// created it already, but pods without staging have nothing else that
+		// would, and the job would fail before executing.
+		if err := p.createRemoteDir(ctx, client, jobScratchBase); err != nil {
+			return fmt.Errorf("create job scratch directory %s for pod %s: %w", jobScratchBase, key, err)
+		}
+		pod.Annotations["nersc.slurm/workdir"] = jobScratchBase
+	}
+
 	var script string
 	if len(pod.Spec.Containers) > 1 {
 		script, err = scripts.PodToSlurmPodmanMultiWithVolumes(pod, volumeScratchPaths)
@@ -236,7 +259,6 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	jobID, err := client.SubmitJob(ctx, superfacility.JobSubmissionRequest{
 		Script:  script,
 		System:  "perlmutter",
-		Queue:   "regular",
 		Project: projectFromSlurmAccount(pod),
 	})
 	if err != nil {
@@ -529,7 +551,18 @@ func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, contain
 
 	logs, err := client.FetchJobLogs(ctx, state.jobID)
 	if err != nil {
-		return nil, err
+		log.Printf("Failed to fetch logs for pod %s job %s via SFAPI status API: %v", key, state.jobID, err)
+		outputPath := scripts.OutputPathForPod(state.pod)
+		if outputPath == "" {
+			return nil, err
+		}
+		log.Printf("Attempting to fetch logs from output file %s", outputPath)
+		data, downloadErr := client.DownloadFile(ctx, "dtns", outputPath)
+		if downloadErr != nil {
+			log.Printf("Failed to download output file %s: %v", outputPath, downloadErr)
+			return nil, fmt.Errorf("fetch logs via SFAPI: %w; download output file %s: %v", err, outputPath, downloadErr)
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 
 	return io.NopCloser(strings.NewReader(logs)), nil

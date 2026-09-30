@@ -383,7 +383,7 @@ func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state
 	return client, token, nil
 }
 
-// Both status polling and cancellation can discover a Slurm ID. Persist it
+// Status polling, log following, and cancellation can discover a Slurm ID. Persist it
 // against the same submission identity, never against a same-name replacement.
 func (p *NerscProvider) retainResolvedJobID(key string, state *podJobState, resolved string) {
 	original := state.jobID
@@ -584,7 +584,7 @@ func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, contain
 		return nil, fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 	}
 	if opts != nil && opts.Follow {
-		return p.followPodLogs(ctx, client, state.jobID), nil
+		return p.followPodLogs(ctx, client, key, state), nil
 	}
 
 	logs, err := client.FetchJobLogs(ctx, state.jobID)
@@ -595,7 +595,7 @@ func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, contain
 	return io.NopCloser(strings.NewReader(logs)), nil
 }
 
-func (p *NerscProvider) followPodLogs(ctx context.Context, client jobClient, jobID string) io.ReadCloser {
+func (p *NerscProvider) followPodLogs(ctx context.Context, client jobClient, key string, state podJobState) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
 		defer writer.Close()
@@ -604,7 +604,20 @@ func (p *NerscProvider) followPodLogs(ctx context.Context, client jobClient, job
 		defer ticker.Stop()
 
 		for {
-			status, err := client.GetJobStatus(ctx, jobID)
+			if current, ok := p.jobStateForPodKey(key); ok && current.pod == state.pod {
+				state.jobID = current.jobID
+			}
+			var status string
+			var err error
+			if resolving, ok := client.(interface {
+				GetJobStatusWithResolution(context.Context, string, func(string)) (string, error)
+			}); ok {
+				status, err = resolving.GetJobStatusWithResolution(ctx, state.jobID, func(resolved string) {
+					p.retainResolvedJobID(key, &state, resolved)
+				})
+			} else {
+				status, err = client.GetJobStatus(ctx, state.jobID)
+			}
 			if err != nil {
 				var unresolved *superfacility.UnresolvedSubmissionError
 				if errors.As(err, &unresolved) {
@@ -615,7 +628,7 @@ func (p *NerscProvider) followPodLogs(ctx context.Context, client jobClient, job
 				return
 			}
 			if isTerminalJobStatus(status) {
-				logs, err := client.FetchJobLogs(ctx, jobID)
+				logs, err := client.FetchJobLogs(ctx, state.jobID)
 				if err != nil {
 					_ = writer.CloseWithError(err)
 					return

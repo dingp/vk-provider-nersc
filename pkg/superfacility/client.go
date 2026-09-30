@@ -243,13 +243,19 @@ func (c *Client) ResolveJobID(ctx context.Context, jobID string) (string, error)
 }
 
 func (c *Client) GetJobStatus(ctx context.Context, jobID string) (string, error) {
+	return c.GetJobStatusWithResolution(ctx, jobID, nil)
+}
+
+// GetJobStatusWithResolution reports a resolved Slurm ID before querying compute
+// accounting, so callers can retain it even when that query fails.
+func (c *Client) GetJobStatusWithResolution(ctx context.Context, jobID string, onResolved func(string)) (string, error) {
 	if machine, taskID, ok := parseTaskJobRef(jobID); ok {
-		return c.getTaskBackedJobStatus(ctx, machine, taskID)
+		return c.getTaskBackedJobStatus(ctx, machine, taskID, onResolved)
 	}
 	return c.getComputeJobStatus(ctx, "perlmutter", jobID)
 }
 
-func (c *Client) getTaskBackedJobStatus(ctx context.Context, machine, taskID string) (string, error) {
+func (c *Client) getTaskBackedJobStatus(ctx context.Context, machine, taskID string, onResolved func(string)) (string, error) {
 	task, err := c.getTask(ctx, taskID)
 	if err != nil {
 		return "", err
@@ -263,6 +269,9 @@ func (c *Client) getTaskBackedJobStatus(ctx context.Context, machine, taskID str
 		slurmJobID := extractSlurmJobID(task.Result)
 		if slurmJobID == "" {
 			return "", &UnresolvedSubmissionError{TaskID: taskID, Result: task.Result}
+		}
+		if onResolved != nil {
+			onResolved(slurmJobID)
 		}
 		return c.getComputeJobStatus(ctx, machine, slurmJobID)
 	default:

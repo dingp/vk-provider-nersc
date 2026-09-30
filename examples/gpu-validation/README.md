@@ -6,18 +6,27 @@ one task, two CPUs per task, 4 GiB memory, and a five-minute walltime. The Pytho
 payload uses the CUDA driver API to launch a small kernel on each GPU and checks
 that each returns 42. The image needs no additional Python packages or toolkit.
 
-Validated on Perlmutter on 2026-09-29: four NVIDIA A100-SXM4-80GB GPUs, all four
-kernel results equal to 42, Slurm COMPLETED/exit `0:0`, Job Complete, and ordinary
-`kubectl logs`. One submission, 14 seconds, no retries. This is a correctness
-smoke test; performance, MPI, NCCL, and multi-node behavior are not measured.
+A passing run requires all four kernel results equal to 42, Slurm
+COMPLETED/exit `0:0`, Job Complete, and ordinary `kubectl logs`. The payload
+reports GPU names; acceptance does not depend on a specific model or GPU memory
+capacity. This smoke test checks correctness. It does not measure performance,
+MPI, NCCL, or multi-node behavior.
+
+Run one workload at a time and record each submission against a total budget.
+The manifest disables Job retries but does not enforce a global submission
+limit. Its five-minute Slurm limit starts when the allocation runs; queue waiting
+is separate.
 
 ## 1. Prepare
 
 Follow the root [installation and credential instructions](../../README.md).
-The provider and virtual Node must be Ready, and `sfapi-client` must exist in
-`nersc-vk-tests`. Never add key data to the manifest. Confirm client expiry,
-source allowlist, and allocation access. Run local commands from the repository
-root in the same shell; only `kubectl` and standard shell tools are needed.
+The provider and virtual Node must be Ready, ordinary logs must work through the
+configured kubelet TLS endpoint, and `sfapi-client` must exist in
+`nersc-vk-tests`. The Secret can use either credential format documented in the
+root README. Never add key data to the manifest. Confirm client expiry, source
+allowlist, and allocation access. Run local commands from the repository root in
+the same shell. You need `kubectl` and standard shell tools (`sed`, `date`,
+`grep`); preparation and accounting also require access to a NERSC login node.
 
 On a **NERSC login node**, using the same identity as the SFAPI client, edit the
 account/QOS values and prepare the pinned Linux amd64 image:
@@ -57,24 +66,44 @@ cat "$MANIFEST"
 kubectl create --dry-run=server -f "$MANIFEST"
 ```
 
-Review the prepared manifest and dry-run result, then submit and observe:
+Review the prepared manifest and dry-run result, then submit:
 
 ```bash
 kubectl create -f "$MANIFEST"
 kubectl -n nersc-vk-tests get pods -l "job-name=$WORKLOAD_NAME" -o wide
-kubectl -n nersc-vk-tests wait --for=condition=complete \
-  "job/$WORKLOAD_NAME" --timeout=900s
-kubectl -n nersc-vk-tests logs "job/$WORKLOAD_NAME" | tee "/tmp/${WORKLOAD_NAME}.log"
+```
+
+If a create response is uncertain, inspect that exact workload before retrying
+with any name. Once its Pod exists, save the Pod UID and submission reference
+before waiting or deleting anything:
+
+```bash
 kubectl get -f "$MANIFEST" -o yaml > "/tmp/${WORKLOAD_NAME}-status.yaml"
 kubectl -n nersc-vk-tests get pods -l "job-name=$WORKLOAD_NAME" -o yaml \
   > "/tmp/${WORKLOAD_NAME}-pods.yaml"
-kubectl -n vk-nersc-system logs deployment/vk-nersc | grep "$WORKLOAD_NAME"
+kubectl -n vk-nersc-system logs deployment/vk-nersc | grep -F -- "$WORKLOAD_NAME"
+```
+
+An `sfapi-task:perlmutter:TASK_ID` reference identifies a submission request,
+not a Slurm job. Repeat the log query to record the resolved Slurm ID. The
+provider retains IDs resolved during status, logs, or cancellation in memory;
+keep your own record because task records can expire and a restart loses the
+provider's mappings. For independent lookup, see the root
+[diagnostic commands](../../README.md#sfapi-diagnostics).
+
+Wait for completion and save stdout:
+
+```bash
+kubectl -n nersc-vk-tests wait --for=condition=complete \
+  "job/$WORKLOAD_NAME" --timeout=900s
+kubectl -n nersc-vk-tests logs "job/$WORKLOAD_NAME" | tee "/tmp/${WORKLOAD_NAME}.log"
 ```
 
 Expected logs include `CUDA_GPU_0_PASSED` through `CUDA_GPU_3_PASSED`, each with
 `result=42`, followed by `GPU_CHECK_PASSED devices=4`. Retain the Pod UID, SFAPI
-task reference, resolved numeric Slurm ID, and image digest. If a create response
-is uncertain, inspect that exact workload before retrying with any name.
+task reference, resolved Slurm ID, and image digest. Plain `kubectl logs`
+retrieves a snapshot of job stdout; `logs -f` waits for a terminal Slurm state
+before returning stdout and is not a live tail.
 
 ## 3. Verify independent Slurm accounting
 
@@ -82,8 +111,8 @@ On a **NERSC login node**, set the exact numeric Slurm ID from the provider logs
 
 ```bash
 SLURM_JOB_ID=REPLACE_WITH_JOB_ID
-sacct -X -j "$SLURM_JOB_ID" \
-  --format=JobID,Account,QOS,NodeList,AllocTRES%60,State,ExitCode,Elapsed,Timelimit
+sacct -X --array -j "$SLURM_JOB_ID" \
+  --format=JobID%64,Account,QOS,NodeList,AllocTRES%60,State%64,ExitCode,Elapsed,Timelimit
 ```
 
 Require COMPLETED/exit zero, one compute NodeList, and four allocated GPUs,
@@ -98,8 +127,17 @@ job on NERSC, record the fallback, and query accounting again:
 
 ```bash
 scancel "$SLURM_JOB_ID"
-sacct -X -j "$SLURM_JOB_ID" --format=JobID,State,ExitCode
+sacct -X --array -j "$SLURM_JOB_ID" --format=JobID%64,State%64,ExitCode
 ```
+
+Repeat accounting until the allocation is confirmed terminal; successful
+Kubernetes deletion or `scancel` alone does not establish that compute stopped.
+Keep credentials and tracking while accounting is missing or ambiguous. This
+manifest creates an ordinary job. If adapting the procedure to an array, inspect
+every selected allocation with expanded accounting; one completed element or
+job step is insufficient. See the root
+[cancellation guidance](../../README.md#cancellation-and-cleanup) for array
+accounting permissions and states requiring further reconciliation.
 
 ## Controls
 
@@ -111,7 +149,8 @@ Edit the copied YAML before submission. Execution annotations belong under
 | Account / QOS | `nersc.slurm/account` / `nersc.slurm/qos` |
 | Node type / count | `nersc.slurm/constraint: gpu` / `nersc.slurm/nodes: '1'` |
 | GPUs | `nersc.slurm/gpus-per-node: '4'`, `nersc.slurm/gpus-per-task: '4'` |
-| Launcher / tasks | `nersc.slurm/launcher: srun`, `nersc.slurm/ntasks: '1'` |
+| Launcher / tasks | `nersc.slurm/launcher: srun`, `nersc.slurm/ntasks: '1'`; `gpus-per-task` requires `srun` |
+| CPU / memory | `nersc.slurm/cpus-per-task: '2'` / `nersc.slurm/mem: 4G`; container resources do not set these Slurm limits |
 | Runtime limit | `nersc.slurm/time: '00:05:00'` |
 | Retries / concurrency | Job `spec.backoffLimit: 0` / `spec.parallelism: 1` |
 | Total submissions | External ledger; no built-in global quota |
@@ -125,11 +164,19 @@ the embedded payload's expected count. Multi-container GPU allocations are share
 
 ## Cleanup
 
-After saving logs, metadata, and terminal Slurm accounting, run locally:
+After saving logs and terminal Slurm accounting, capture final Kubernetes status
+and delete the owner locally:
 
 ```bash
+kubectl get -f "$MANIFEST" -o yaml > "/tmp/${WORKLOAD_NAME}-status.yaml"
+kubectl -n nersc-vk-tests get pods -l "job-name=$WORKLOAD_NAME" -o yaml \
+  > "/tmp/${WORKLOAD_NAME}-pods.yaml"
 kubectl delete -f "$MANIFEST" --wait=true --ignore-not-found
 ```
+
+For a timeout or cancellation path, capture that metadata before deleting the
+Job. Deleting only its Pod can allow the Job controller to create replacement
+work.
 
 When every workload using the test Secret is terminal and removed:
 

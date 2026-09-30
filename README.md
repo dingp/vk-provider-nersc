@@ -15,18 +15,24 @@ The provider implements submission, status, cancellation, and job log retrieval.
 It also implements optional file staging, sidecars, and StatefulSet scratch paths.
 See [limitations](#operating-limits) before deploying controllers that create work.
 
-Validation on 2026-09-29 covered CPU Pod/Job execution, ordinary Kubernetes logs,
-deliberate failure, and running-job cancellation. See the
-[CPU validation examples](examples/cpu-validation/). Data staging and StatefulSets
-were not qualified by these tests.
-A subsequent [four-GPU smoke Job](examples/gpu-validation/) passed on all four
-A100 80 GB GPUs of one Perlmutter node on 2026-09-29, including normal
-`kubectl logs` and independent Slurm accounting.
+Start with the [CPU validation examples](examples/cpu-validation/) for success,
+failure, logs, and cancellation, then the [four-GPU Job](examples/gpu-validation/).
+These examples include standalone manifests and copyable commands. Optional
+staging, sidecars, StatefulSets, and multi-node execution require separate
+qualification for your environment.
+
+## Guide
+
+- [Build](#build-and-test) and [install](#install-the-provider) the physical provider.
+- [Configure workload credentials](#workload-authentication) and [run a CPU job](#first-cpu-job).
+- [Set account, QOS, node type, and job limits](#slurm-resource-annotations).
+- [Track, cancel, and clean up work](#cancellation-and-cleanup), or [run diagnostics](#sfapi-diagnostics).
+- Review [operating limits](#operating-limits) and the [optional feature guides](#optional-features).
 
 ## Prerequisites
 
 - Kubernetes access with permission to install the chart's cluster-scoped RBAC and
-  virtual Node, Helm 3, and one physical Linux amd64 worker.
+  virtual Node, Helm, and one physical Linux amd64 worker.
 - A built provider image accessible to that worker, preferably pinned by digest.
 - Outbound HTTPS from the provider to SFAPI and the NERSC OIDC token service.
 - An API-server-to-provider route on TCP 10250, a serving certificate trusted by the
@@ -46,12 +52,12 @@ make test
 make build build-probe
 # Set IMAGE to your own repository and revision tag.
 export IMAGE=registry.example.com/your-team/vk-nersc:your-revision
-docker build -t "$IMAGE" .
+docker build --platform linux/amd64 -t "$IMAGE" .
 docker push "$IMAGE"
 ```
 
-`Dockerfile` accepts `GO_IMAGE` and `RUNTIME_IMAGE` build arguments. Validation
-used Go 1.24 on Linux amd64; the module declares Go 1.21. Build output includes
+`Dockerfile` accepts `GO_IMAGE` and `RUNTIME_IMAGE` build arguments. Use a Go
+version compatible with [go.mod](go.mod); the default builder and CI use Go 1.21. Build output includes
 `vk-nersc` and the optional `sfapi-probe` diagnostic helper. Record the pushed
 manifest digest and use it in Helm values. For an offline import, import the OCI
 archive on the selected worker, verify its containerd digest, and use
@@ -63,11 +69,12 @@ Local development uses a real cluster and creates a virtual Node:
 export KUBECONFIG=/absolute/path/to/kubeconfig
 export SF_API_ENDPOINT=https://api.nersc.gov/api/v1.2
 export VK_NODE_NAME=perlmutter-vk-dev
-export VK_NODE_IP=<address-reachable-from-api-server>
+export VK_NODE_IP='REPLACE_WITH_API_SERVER_REACHABLE_IP'
 ./bin/vk-nersc
 ```
 
-Set the TLS variables described below for authenticated log serving. The local
+Replace the IP placeholder before starting. Set the TLS variables described below
+for authenticated log serving. The local
 fallback certificate is self-signed and lasts 24 hours; it has no client
 certificate authentication. Keep that mode isolated to development.
 
@@ -82,14 +89,37 @@ complete secure installations.
 1. Inspect the cluster and select a Ready physical worker. Check DaemonSets that
    tolerate every taint; exclude `type=virtual-kubelet` from system agents before
    creating the virtual Node.
-2. Reserve a stable endpoint for kubelet logs, such as a ClusterIP Service with
-   selector `app: vk-nersc`, port/targetPort 10250, in `vk-nersc-system`. The chart
-   does **not** create this Service or a NetworkPolicy.
+2. Create the provider namespace and a stable endpoint for kubelet logs. For a
+   ClusterIP reachable from your API server:
+
+   ```bash
+   kubectl create namespace vk-nersc-system
+   kubectl apply -f - <<'YAML'
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: vk-nersc-kubelet
+     namespace: vk-nersc-system
+   spec:
+     selector:
+       app: vk-nersc
+     ports:
+       - name: kubelet
+         port: 10250
+         targetPort: 10250
+   YAML
+   kubectl -n vk-nersc-system get service vk-nersc-kubelet \
+     -o jsonpath='{.spec.clusterIP}{"\n"}'
+   ```
+
+   Reuse an existing namespace/Service only after verifying ownership. Use the
+   returned IP for the certificate SAN and `vkNodeAddress` below. The chart does
+   **not** create this Service or a NetworkPolicy. If your API server cannot route
+   to ClusterIPs, provide another stable, reachable endpoint with matching TLS.
 3. Create a serving certificate whose SAN includes that endpoint. Its issuer must
    match the API server's `--kubelet-certificate-authority`. Create the Secret:
 
    ```bash
-   kubectl create namespace vk-nersc-system
    kubectl -n vk-nersc-system create secret generic vk-nersc-tls \
      --from-file=tls.crt=/private/path/serving.crt \
      --from-file=tls.key=/private/path/serving.key \
@@ -127,12 +157,14 @@ complete secure installations.
    Add `imagePullSecrets` if required. Restrict kubelet ingress with an enforced
    NetworkPolicy to the API server's observed source addresses. Do not assume
    traffic retains the physical host address across the CNI.
-5. Render, inspect, and install:
+5. Render, inspect, and install. For an existing release, first stop controllers
+   that can create replacement work and independently reconcile every remote job.
+   An upgrade or rollback restarts the provider and loses its in-memory mappings:
 
    ```bash
    helm lint ./chart -f values-site.yaml
    helm template vk-nersc ./chart -n vk-nersc-system -f values-site.yaml > rendered.yaml
-   kubectl apply --dry-run=server -f rendered.yaml
+   kubectl -n vk-nersc-system apply --dry-run=server -f rendered.yaml
    helm upgrade --install vk-nersc ./chart -n vk-nersc-system \
      -f values-site.yaml --wait --timeout 180s
    kubectl -n vk-nersc-system get pods -o wide
@@ -155,9 +187,9 @@ requires its exact configured CN. Serving certificate/key files reload on each
 handshake; renew the mounted Secret before expiry. Changes to the client CA or CN
 require an idle provider restart.
 
-On the tested RKE2 configuration, advertising a virtual Node InternalIP caused
-RKE2 to look for a nonexistent agent tunnel and return HTTP 502. Use the stable
-Service IP as `vkNodeAddress` and this extra environment setting:
+If RKE2 routes the virtual Node's InternalIP through an agent tunnel and log
+requests fail with HTTP 502, advertise the reachable Service IP as a Hostname
+address. Set `vkNodeAddress` to that numeric IP and add:
 
 ```yaml
 extraEnv:
@@ -194,6 +226,20 @@ The PEM private key is not required. Alternatively use
 {"client_id":"<client-id>","secret":{"kty":"RSA","n":"...","e":"...","d":"...","p":"...","q":"...","dp":"...","dq":"...","qi":"..."}}
 ```
 
+To create that combined file from the two downloads, replace the paths below.
+This writes a new owner-only file and refuses to overwrite an existing one:
+
+```bash
+python3 - /private/path/clientid.txt /private/path/priv_key.jwk /private/path/sf_api.json <<'PYTHON'
+import json, os, sys
+from pathlib import Path
+payload = {"client_id": Path(sys.argv[1]).read_text().strip(),
+           "secret": json.loads(Path(sys.argv[2]).read_text())}
+with os.fdopen(os.open(sys.argv[3], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
+    json.dump(payload, output)
+PYTHON
+```
+
 Set `nersc.sf/credentialSecretName: sfapi-client` on the Pod. For a custom JSON
 Secret key set `nersc.sf/credentialSecretKey`; the default JSON key is
 `sf_api.json`. Omit that annotation when using the separate-key format.
@@ -206,61 +252,39 @@ job has reached a confirmed terminal state, including during cancellation.
 
 ## First CPU job
 
-Use the [tested CPU validation examples](examples/cpu-validation/) for successful
-Pod/Job, deliberate failure, and cancellation cases. Each is a standalone YAML
-manifest with copyable configuration, submission, monitoring, and cleanup commands
-in its README. The [four-GPU Job](examples/gpu-validation/) embeds its tested CUDA
-payload directly in the manifest. Set account/QOS and a unique name using the
-documented shell commands; edit resource annotations in the YAML.
+Use [examples/cpu-validation/job.yaml](examples/cpu-validation/job.yaml) and its
+[README](examples/cpu-validation/README.md) as the first workload. That guide covers
+image preparation, explicit account/QOS settings, unique names, a rendered manifest,
+one-time submission, logs, remote accounting, and cleanup. Start with one CPU Job,
+one node, a five-minute Slurm limit, `backoffLimit: 0`, and `restartPolicy: Never`.
+The [four-GPU example](examples/gpu-validation/) follows the same workflow and
+embeds a CUDA assertion for each GPU.
 
+Prepare the digest-pinned image using the same NERSC identity before submitting
+work; the provider does not pre-pull images. `sfapi-probe prepare-image` can run
+this preparation through the provider's network path; see [diagnostics](#sfapi-diagnostics).
 
-Prepare a digest-pinned image with the same NERSC identity on a login node using
-`podman-hpc pull IMAGE@sha256:DIGEST`. Verify migrated image availability before
-submitting compute work. The provider does not pre-pull images for you.
-
-Copy [examples/job.yaml](examples/job.yaml), select `nersc-vk-tests`, replace its
-account/image placeholders, and set `nersc.slurm/constraint: cpu`, an allowed QOS,
-`nersc.slurm/nodes: '1'`, and `nersc.slurm/time: '00:05:00'`. Start with one Job,
-`backoffLimit: 0`, `restartPolicy: Never`, and a deterministic short command.
-Every workload must include both scheduling fields:
+Every remote workload needs both scheduling fields (under `spec.template.spec`
+for a Job, or `spec` for a Pod):
 
 ```yaml
-spec:
-  nodeSelector:
-    kubernetes.io/hostname: perlmutter-vk
-  tolerations:
-    - key: virtual-kubelet.io/provider
-      operator: Equal
-      value: nersc
-      effect: NoSchedule
+nodeSelector:
+  kubernetes.io/hostname: perlmutter-vk
+tolerations:
+  - key: virtual-kubelet.io/provider
+    operator: Equal
+    value: nersc
+    effect: NoSchedule
 ```
 
-For a Job, these fields go under `spec.template.spec`. Keep both; using `nodeName`
-bypasses the scheduler and does not test scheduling isolation.
+Use your configured virtual Node name if it differs. Keep the provider Deployment
+on a physical worker; its top-level Helm `tolerations` value is separate from
+these workload tolerations. Setting `nodeName` directly bypasses scheduling checks.
 
-```bash
-kubectl -n nersc-vk-tests create -f my-cpu-job.yaml
-kubectl -n nersc-vk-tests get pods -o wide
-kubectl -n nersc-vk-tests describe job hpc-job
-kubectl -n nersc-vk-tests logs job/hpc-job
-kubectl -n vk-nersc-system logs deployment/vk-nersc
-```
-
-Record the Pod UID and provider's submission reference. An `sfapi-task:` reference
-is an asynchronous submission task, **not** a Slurm job ID. Resolve it through
-SFAPI before querying/cancelling the real job. Acceptance requires Slurm account,
-compute NodeList and terminal state, deterministic stdout, Pod success, and Job
-completion. Set a submission budget and queue timeout before tests; a timeout is
-inconclusive until all remote work is reconciled. Never repeat an ambiguous create.
-
-Cancellation confirms all selected Slurm allocation records. When a numeric
-ID is identified as an array parent, it uses an expanded `sacct` allocation query
-through SFAPI command execution because a singular job response may omit elements.
-This parent-array path requires command-execution permission (RED scope); command
-errors never fall back to the incomplete response. Ordinary jobs and exact array
-tasks keep their direct accounting path. Empty, unidentified, unknown, or incomplete
-accounting remains unconfirmed; retain tracking and reconcile remote work
-independently after an error. Job-step records alone cannot prove shutdown.
+Record the Pod UID, SFAPI submission reference, and resolved Slurm ID. Accept a
+successful test only after the expected stdout, Kubernetes completion, and
+independent Slurm account, compute-node, and terminal-state checks agree. A local
+wait timeout does not stop remote work. Never repeat an ambiguous submission.
 
 ## Operating limits
 
@@ -297,13 +321,35 @@ independently after an error. Job-step records alone cannot prove shutdown.
 
 ## Cancellation and cleanup
 
-Deleting an owned Pod asks the provider to resolve any submission task, cancel the
-real Slurm job, and confirm a terminal state. Any Slurm ID discovered during
-cancellation is retained before subsequent requests, including when confirmation
-fails and the task later expires. On uncertainty it retains tracking
-and returns an error. Stop the Job/StatefulSet that could replace the Pod first.
-Record IDs before deleting anything; Kubernetes deletion alone is not evidence
-that remote compute has stopped.
+### Track the submission and allocation separately
+
+For asynchronous submission, the provider records
+`sfapi-task:<machine>:<task-id>`. This task reference is distinct from the Slurm
+allocation; an immediate Slurm ID is also accepted when SFAPI returns one. The provider retains
+the resolved Slurm ID before subsequent status, snapshot-log, followed-log, or
+cancellation requests, so later operations can continue after that SFAPI task
+expires. This retention is in memory; it does not survive a provider restart.
+Save the references outside the provider before deleting work or changing it.
+
+### Confirm remote termination
+
+Deleting an owned Pod asks the provider to resolve any pending submission,
+cancel the real Slurm job, and confirm terminal accounting. Stop the owning
+Job/StatefulSet first so it cannot create replacement work. Kubernetes deletion
+alone does not prove that remote compute has stopped.
+
+Cancellation requires terminal records for every selected allocation. If a
+numeric ID is identified as an array parent, the client switches to expanded
+`sacct --allocations --array` accounting through SFAPI command execution for the
+rest of that attempt. This path requires command-execution permission (RED scope).
+Ordinary jobs, exact array-task IDs, and numeric aliases for individual tasks keep
+their scoped direct-accounting path.
+
+Empty, unknown, malformed, conflicting, or incomplete accounting cannot confirm
+termination. Job-step records alone are insufficient. On an error, the provider
+retains job/staging tracking; keep credentials available and reconcile the saved
+IDs independently. Cancellation waits at most two minutes (or the caller's shorter
+deadline); expiry of that wait does not establish remote termination.
 
 `BOOT_FAIL`/`BF` and `DEADLINE`/`DL` are terminal failures. The provider keeps
 tracking `PREEMPTED` and `REVOKED` until termination is confirmed: preemption may
@@ -312,36 +358,6 @@ If accounting remains in one of these ambiguous states, cancellation returns an
 error and requires independent reconciliation. See Slurm's
 [job state definitions](https://slurm.schedmd.com/job_state_codes.html) and
 [federation behavior](https://slurm.schedmd.com/federation.html).
-
-The helper reads combined credential JSON only from stdin:
-
-```bash
-sfapi-probe check < /private/path/sf_api.json
-sfapi-probe preflight /pscratch/sd/u/username < /private/path/sf_api.json
-sfapi-probe task TASK_ID < /private/path/sf_api.json
-sfapi-probe job SLURM_JOB_ID < /private/path/sf_api.json
-sfapi-probe cancel SLURM_JOB_ID < /private/path/sf_api.json
-sfapi-probe prepare-image IMAGE@sha256:DIGEST < /private/path/sf_api.json
-```
-
-For `job` and `cancel`, `SLURM_JOB_ID` accepts a numeric job ID such as `12345`
-or an individual array-task ID such as `12345_7` (including `12345_0`).
-`cancel` also accepts a submission reference such as
-`sfapi-task:perlmutter:TASK_ID`.
-
-Run it via `kubectl exec -i` inside the physical provider Pod when testing the
-allowlisted provider egress path. The probe reads `SF_API_ENDPOINT` for all SFAPI
-operations, including direct diagnostics and cancellation; when unset or blank,
-it defaults to `https://api.nersc.gov/api/v1.2`. Its token exchange continues to use
-the NERSC OIDC service. It prints no access tokens. Account checks may
-contain identity/allocation metadata; retain only fields needed for evidence.
-`preflight` inspects scratch, Podman-HPC, and Slurm associations without submitting
-a compute job. `gpu-preflight ACCOUNT QOS` checks a one-node, four-GPU request with
-`sbatch --test-only`. `prepare-image` performs image preparation on a login node
-and requires a full 64-character SHA256 digest. These command probes exit nonzero
-if the remote command fails or its result does not confirm success; a completed
-SFAPI task alone is insufficient. Successful commands may still print stderr
-(for example, Slurm start estimates).
 
 If the provider crashes, stop controllers, independently query the saved SFAPI
 tasks and Slurm IDs, and cancel only owned jobs. Do not restart and replay tracked
@@ -358,7 +374,92 @@ The virtual Node is created by the provider and is not Helm-owned. Separately
 created Services, NetworkPolicies, TLS Secrets, and DaemonSet exclusions also
 need explicit cleanup. Keep remote output files unless their deletion is intended.
 
-## Slurm Resource Annotations
+## SFAPI diagnostics
+
+`make build-probe` creates `./bin/sfapi-probe`; the container image installs it on
+`PATH`. It reads combined credential JSON from stdin and prints no access tokens.
+Use the `{"client_id":"...","secret":{...}}` shape shown under
+[workload authentication](#workload-authentication), even if the Kubernetes Secret
+uses separate `client_id` and `jwk` keys. Keep this file private and outside Git.
+
+```bash
+./bin/sfapi-probe check < /private/path/sf_api.json
+./bin/sfapi-probe preflight /pscratch/sd/u/username < /private/path/sf_api.json
+./bin/sfapi-probe gpu-preflight YOUR_ACCOUNT YOUR_QOS < /private/path/sf_api.json
+./bin/sfapi-probe prepare-image IMAGE@sha256:DIGEST < /private/path/sf_api.json
+./bin/sfapi-probe task TASK_ID < /private/path/sf_api.json
+./bin/sfapi-probe job SLURM_JOB_ID < /private/path/sf_api.json
+./bin/sfapi-probe cancel SLURM_JOB_ID < /private/path/sf_api.json
+```
+
+To use the provider's allowlisted egress path, run the same operation inside its
+physical Pod. The redirection below reads a local file and sends it through stdin;
+the key is not written to the container filesystem:
+
+```bash
+kubectl -n vk-nersc-system exec -i deployment/vk-nersc -- \
+  sfapi-probe check < /private/path/sf_api.json
+```
+
+| Command | Meaning |
+| --- | --- |
+| `check` | Query identity and project metadata. |
+| `preflight SCRATCH` | Check an absolute scratch path, Podman-HPC, and Slurm associations. |
+| `gpu-preflight ACCOUNT QOS` | Run `sbatch --test-only` for one node/four GPUs; no compute allocation is submitted. |
+| `prepare-image IMAGE@sha256:DIGEST` | Pull/prepare a container on a login node; requires a full 64-character digest. |
+| `task TASK_ID` | Inspect the SFAPI task; completion alone does not prove a successful Slurm job or remote command. |
+| `job SLURM_JOB_ID` | Read the singular SFAPI job-accounting response. It may omit other array elements. |
+| `cancel ID` | Resolve if needed, cancel, and confirm selected allocations; errors require independent reconciliation. |
+
+`job` accepts a numeric Slurm ID (`12345`) or exact array-task ID (`12345_7`,
+including `_0`). Resolve a submission task before using `job`. `cancel` accepts
+those IDs and `sfapi-task:perlmutter:TASK_ID` directly; it waits for the resolved
+Slurm ID rather than deleting the submission task.
+
+For an array, check every known element and complete allocation accounting; one
+row from `job PARENT_ID` cannot prove that all elements stopped. On a NERSC login
+node, an independent query for an owned parent is:
+
+```bash
+sacct --allocations --array --jobs=12345 \
+  --format=JobID%64,JobIDRaw%64,State%64,ExitCode,NodeList
+```
+
+Replace `12345` with the recorded parent ID. `PREEMPTED` and `REVOKED` remain
+ambiguous; use the [cancellation guidance](#cancellation-and-cleanup).
+
+The probe reads `SF_API_ENDPOINT` for all SFAPI operations, defaulting to
+`https://api.nersc.gov/api/v1.2` when unset or blank. Its token exchange still uses
+the NERSC OIDC service. In-container runs inherit the provider's endpoint setting.
+Command probes exit nonzero if the remote command fails or returns an unsuccessful
+or malformed result; successful commands may still emit stderr, such as start
+estimates. Identity/account responses may include allocation metadata, so save
+only the evidence you need.
+
+## Slurm resource annotations
+
+### Choose resources and limits
+
+Put Slurm annotations on the Pod, or on `spec.template.metadata.annotations` for
+a Job/StatefulSet. One provider instance can track multiple remote jobs; provider
+replica count does not impose a remote concurrency limit.
+
+| Control | Where to set it |
+| --- | --- |
+| Slurm account and QOS | `nersc.slurm/account` and `nersc.slurm/qos`; use values permitted for the workload's NERSC identity. |
+| CPU or GPU node type | `nersc.slurm/constraint: cpu` or `gpu`; GPU jobs also need an explicit GPU-count annotation. |
+| Nodes per allocation | `nersc.slurm/nodes`; start with `1`. |
+| Time per allocation | `nersc.slurm/time`; for example, `00:05:00`. |
+| GPUs per node | `nersc.slurm/gpus-per-node`; the GPU example requests all four GPUs on one node. |
+| Concurrent Pods within one Job | Job `spec.parallelism`; start with `1`. |
+| Kubernetes Job retries | Job `spec.backoffLimit`; use `0` for bounded validation. |
+| Total submissions across tests/retries | Maintain an external count or ledger; the provider has no global submission-budget setting. |
+
+`kubectl wait --timeout` controls how long the local command waits. The Slurm
+walltime controls allocation duration; reconcile remote work when a local wait
+expires. Run tests sequentially when your budget allows only one active node.
+
+### Annotation reference
 
 By default, each pod is submitted as a conservative single-node Slurm job:
 
@@ -376,18 +477,13 @@ By default, the provider runs the container once with `podman-hpc run` inside th
 ```yaml
 metadata:
   annotations:
-    nersc.slurm/account: "m1234"
-    nersc.slurm/nodes: "4"
-    nersc.slurm/ntasks: "16"
-    nersc.slurm/tasks-per-node: "4"
-    nersc.slurm/cpus-per-task: "16"
-    nersc.slurm/gpus-per-node: "4"
-    nersc.slurm/gpus-per-task: "1"
-    nersc.slurm/launcher: "srun"
-    nersc.slurm/mem: "128GB"
-    nersc.slurm/time: "02:00:00"
-    nersc.slurm/qos: "debug"
-    nersc.slurm/constraint: "gpu"
+    nersc.slurm/account: "YOUR_ACCOUNT"
+    nersc.slurm/qos: "YOUR_QOS"
+    nersc.slurm/constraint: "cpu"
+    nersc.slurm/nodes: "1"
+    nersc.slurm/cpus-per-task: "2"
+    nersc.slurm/mem: "4GB"
+    nersc.slurm/time: "00:05:00"
 ```
 
 Supported Slurm annotations:
@@ -411,8 +507,12 @@ Supported Slurm annotations:
 
 Invalid annotation values fail pod submission before the Slurm job is created.
 
+## Optional features
 
-## Sidecars and StatefulSets
+These paths are implemented but require separate validation before relying on them.
+The CPU/GPU examples exercise ordinary compute and logs without data staging.
+
+### Sidecars and StatefulSets
 
 Multi-container Pods use one Slurm allocation and one Podman pod. The first
 container is the main container unless `nersc.vk/mainContainer` selects another.
@@ -420,67 +520,31 @@ Sidecars start first and are stopped after the main container exits; startup
 readiness is the workload's responsibility. `launcher=srun` supports only
 single-container Pods.
 
-StatefulSet scratch paths include the owner name and replica ordinal. See
-[StatefulSet notes](docs/statefulsets.md) and the operating limits above.
+StatefulSet scratch paths include the owner name and replica ordinal. This naming
+does not provide Kubernetes service networking or CSI storage on Perlmutter.
+See [StatefulSets](docs/statefulsets.md) and [MPI/rank launching](docs/mpi-workloads.md).
 
-## PVC Integration & Optional Data Staging
+### Scratch volumes and data staging
 
-By default, workloads run directly against their Perlmutter scratch paths and no data transfer is started. This is the right mode when inputs already exist on scratch and outputs should remain there.
+Without staging annotations, the provider performs no file transfer. Declared Pod
+volumes map to remote scratch directories and must have matching container
+`volumeMounts` to expose those files. `nersc.sf/scratchBase` controls path naming;
+it does not change the container working directory or Slurm stdout location.
+A Kubernetes PVC does not make cluster storage available on Perlmutter.
 
-Add pod annotations to opt into stage-in/out. `nersc.sf/transferMode` defaults to `globus`, which is the best fit for directory-scale endpoint-to-endpoint transfers:
+| Mode | Configuration and guide |
+| --- | --- |
+| Scratch only | Define Pod volumes/mounts and a scratch base; see [PVC and scratch mapping](docs/pvc-usage.md). |
+| Globus staging | Set `nersc.sf/inputSource` and/or `nersc.sf/outputDest` plus `nersc.sf/stageOut`; `nersc.sf/transferMode` defaults to `globus`. Set a concrete absolute scratch base; requires the SFAPI client's Globus capability and usable endpoints. See [Globus staging](docs/globus-staging.md). |
+| SFAPI single-file staging | Set `nersc.sf/transferMode: sfapi`, an absolute remote scratch base, and provider-local paths under `SFAPI_TRANSFER_LOCAL_ROOT`. See [PVC/staging setup](docs/pvc-usage.md). |
 
-```yaml
-metadata:
-  annotations:
-    nersc.sf/credentialSecretName: "sfapi-client"
-    nersc.sf/transferMode: "globus"
-    nersc.sf/inputSource: "globus://endpoint-id/path/to/input"
-    nersc.sf/outputDest: "globus://endpoint-id/path/to/output"
-    nersc.sf/stageOut: "true"
-```
-
-VK will:
-1. Stage input data from `nersc.sf/inputSource` to the selected scratch staging path before Slurm job submission
-2. Mount scratch paths in the container via `--volume`
-3. Start output staging to `nersc.sf/outputDest` after the Slurm job succeeds when `nersc.sf/stageOut` is `true`
-4. Keep the pod in `Running` with reason `StageOutRunning` until output transfer completes
-
-Globus URIs use the form `globus://<endpoint>/<absolute/path>`. The endpoint can be a Globus UUID or a NERSC shortcut supported by the Superfacility API, such as `dtn`, `hpss`, or `perlmutter`.
-
-The workload's Superfacility API client credentials must have the optional Globus capability enabled. If staging annotations are present but Globus is not enabled for that SFAPI client, stage-in fails before compute submission or stage-out marks the pod failed with the transfer error.
-
-Set `nersc.sf/transferMode: "sfapi"` to use the Superfacility API file utilities instead of Globus. This mode supports single-file upload/download between a provider-local directory and Perlmutter, so the provider deployment must set `SFAPI_TRANSFER_LOCAL_ROOT` through the Helm `sfapiTransferLocalRoot` value and mount any shared Airflow/provider volume at that path. Because SFAPI utility paths are concrete remote filesystem paths, `nersc.sf/scratchBase` must also be set to an absolute NERSC path such as `/pscratch/sd/a/alice/vk-provider-nersc`; `$SCRATCH` shell expansion is not available to the upload/download API.
-
-```yaml
-metadata:
-  annotations:
-    nersc.sf/credentialSecretName: "sfapi-client"
-    nersc.sf/transferMode: "sfapi"
-    nersc.sf/scratchBase: "/pscratch/sd/a/alice/vk-provider-nersc"
-    nersc.sf/inputSource: "inputs/config.json"
-    nersc.sf/outputDest: "outputs/result.json"
-    nersc.sf/stageOut: "true"
-```
-
-In SFAPI mode, `inputSource` and `outputDest` are paths under `SFAPI_TRANSFER_LOCAL_ROOT`. Stage-in creates the selected remote scratch directory, uploads the input file using the same basename, and stage-out downloads the matching file from the selected scratch volume back under `SFAPI_TRANSFER_LOCAL_ROOT`.
-
-### Staging annotations
-
-| Annotation | Required | Description |
-| --- | --- | --- |
-| `nersc.sf/credentialSecretName` | Yes | Kubernetes Secret in the workload namespace containing SFAPI client credentials for this pod. |
-| `nersc.sf/credentialSecretKey` | No | Secret data key containing `{"client_id": "...", "secret": {...}}`; defaults to `sf_api.json`. |
-| `nersc.sf/transferMode` | No | `globus` (default) or `sfapi`. |
-| `nersc.sf/scratchBase` | Required for `transferMode=sfapi` | Concrete absolute NERSC base path for per-pod scratch staging. Defaults to `$SCRATCH/vk-provider-nersc` for non-SFAPI modes. |
-| `nersc.sf/inputSource` | No | In Globus mode, a `globus://` source URI. In SFAPI mode, a provider-local file path under `SFAPI_TRANSFER_LOCAL_ROOT`. |
-| `nersc.sf/outputDest` | Required when `stageOut` is `true` | In Globus mode, a `globus://` destination URI. In SFAPI mode, a provider-local destination file path under `SFAPI_TRANSFER_LOCAL_ROOT`. |
-| `nersc.sf/stageOut` | No | Set to `true` to enable output staging. |
-| `nersc.sf/inputVolume` | Required for input staging with multiple volumes | Volume name whose scratch path should receive staged input. |
-| `nersc.sf/outputVolume` | Required for output staging with multiple volumes | Volume name whose scratch path should supply staged output. |
-| `nersc.sf/stageVolume` | No | Shared fallback volume name for both input and output staging. If omitted with one volume, that volume is used. If omitted with no volumes, the pod scratch base is used. |
-| `nersc.sf/globusUsername` | No | Optional Superfacility API `username` value for Globus transfers when the SFAPI client has permission to act for another user. |
-
-Current staging annotations are read from the pod template. PVCs are still supported as Kubernetes volumes, but PVC annotations are not read directly by this provider unless they are copied onto the pod.
+The Helm `sfapiTransferLocalRoot` value sets an environment variable only. Mounting
+a shared provider-local directory requires a chart extension or manifest overlay;
+the chart currently has no general extra-volume values. Staging annotations are
+read from the Pod template, not from the PVC object. After successful compute,
+pending Globus stage-out keeps the Pod Running with `StageOutStarting` or
+`StageOutRunning` until transfer completion. SFAPI file transfers can complete
+synchronously during status reconciliation.
 
 ---
 

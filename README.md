@@ -264,6 +264,8 @@ inconclusive until all remote work is reconciled. Never repeat an ambiguous crea
   Use only in a trusted cluster; namespace tenancy isolation is not implemented.
 - The kubelet-compatible endpoint implements logs only. `exec`, attach, port
   forwarding, Pod networking/Services, and full kubelet behavior are unavailable.
+- Use `restartPolicy: Never` for bare Pods. The provider runs one Slurm allocation
+  per Pod and does not implement Kubernetes container restarts.
 - Container phases/exit status are synthesized. Failed containers report exit 1;
   inspect Slurm accounting for the actual payload exit code. Logs aggregate job
   stdout, not separate per-container streams. `logs -f` waits for job completion

@@ -33,6 +33,7 @@ metadata:
     nersc.sf/outputVolume: "output"
     nersc.sf/stageOut: "true"
 spec:
+  restartPolicy: Never
   nodeSelector:
     kubernetes.io/hostname: perlmutter-vk
   tolerations:

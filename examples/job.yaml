@@ -11,6 +11,11 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: perlmutter-vk
+      tolerations:
+      - key: virtual-kubelet.io/provider
+        operator: Equal
+        value: nersc
+        effect: NoSchedule
       containers:
       - name: batch-task
         image: registry.example.com/batch:latest

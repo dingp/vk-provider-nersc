@@ -91,6 +91,13 @@ func TestPrivateKeyJWTTokenSourceFetchesAndCachesToken(t *testing.T) {
 	if requests != 1 {
 		t.Fatalf("requests = %d, want cached token to avoid second request", requests)
 	}
+	now = now.Add(10 * time.Minute)
+	if _, err := source.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("expired access token was not refreshed: requests=%d", requests)
+	}
 }
 
 func TestParseRSAPrivateJWKRejectsMissingFields(t *testing.T) {

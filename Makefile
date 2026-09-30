@@ -8,6 +8,9 @@ tidy:
 build:
 	go build -o bin/$(BINARY_NAME) ./cmd/vk-nersc
 
+build-probe:
+	go build -o bin/sfapi-probe ./cmd/sfapi-probe
+
 test:
 	go test ./...
 

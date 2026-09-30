@@ -67,7 +67,7 @@ func PodToSlurmPodmanWithVolumes(pod *corev1.Pod, volPaths map[string]string) (s
 
 	c := pod.Spec.Containers[0]
 	setup := buildVolumeSetup(c.VolumeMounts, volPaths)
-	runCommand := renderLaunchCommand(opts, containerRunCommand(c, volPaths, false))
+	runCommand := renderLaunchCommand(opts, containerRunCommand(c, volPaths, false, opts))
 
 	return fmt.Sprintf(`#!/bin/bash
 %s
@@ -110,9 +110,9 @@ trap cleanup EXIT
 `, renderSlurmDirectives(opts), buildVolumeSetupForPod(pod, volPaths), shellQuote(pod.Name+"-pod"))
 
 	for _, c := range sidecars {
-		fmt.Fprintf(sb, "%s &\n", containerRunCommand(c, volPaths, true))
+		fmt.Fprintf(sb, "%s &\n", containerRunCommand(c, volPaths, true, opts))
 	}
-	fmt.Fprintf(sb, "%s\n", containerRunCommand(mainContainer, volPaths, true))
+	fmt.Fprintf(sb, "%s\n", containerRunCommand(mainContainer, volPaths, true, opts))
 	return sb.String(), nil
 }
 
@@ -315,8 +315,18 @@ func annotationValue(pod *corev1.Pod, key string) string {
 	return strings.TrimSpace(pod.Annotations[key])
 }
 
-func containerRunCommand(c corev1.Container, volPaths map[string]string, inPod bool) string {
+func containerRunCommand(c corev1.Container, volPaths map[string]string, inPod bool, opts slurmOptions) string {
 	args := []string{"podman-hpc", "run", "--rm"}
+	if opts.GPUs > 0 || opts.GPUsPerNode > 0 || opts.GPUsPerTask > 0 {
+		args = append(args, "--gpu", "--env", "CUDA_VISIBLE_DEVICES")
+	}
+	if opts.Launcher == launcherSrun {
+		// Resolve these inside each srun task, preserving its GPU/rank binding.
+		// Do not forward the whole host environment (which may contain secrets).
+		for _, name := range []string{"SLURM_JOB_ID", "SLURM_PROCID", "SLURM_LOCALID", "SLURM_NTASKS"} {
+			args = append(args, "--env", name)
+		}
+	}
 	if inPod {
 		args = append(args, "--pod", `"$POD_ID"`)
 	}

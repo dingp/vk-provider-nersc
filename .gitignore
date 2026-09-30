@@ -2,3 +2,12 @@ bin/
 sf_api.json
 __pycache__/
 *.pyc
+
+# Private credential material and site-only rendering
+clientid.txt
+priv_key.*
+*.jwk
+*.pem
+*.key
+values-site.yaml
+rendered.yaml

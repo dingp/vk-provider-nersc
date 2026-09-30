@@ -32,7 +32,7 @@ with DAG(
         ],
         annotations={
             "nersc.sf/credentialSecretName": "sfapi-client",
-            "nersc.slurm/account": "nstaff",
+            "nersc.slurm/account": "REPLACE_WITH_ACCOUNT",
             "nersc.slurm/time": "00:05:00",
             "nersc.slurm/mem": "1GB",
             "nersc.slurm/qos": "debug",

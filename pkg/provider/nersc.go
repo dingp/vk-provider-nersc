@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,16 +23,17 @@ import (
 )
 
 type NerscProvider struct {
-	sfClientFactory      jobClientFactory
-	tokenResolver        TokenResolver
-	nodeName             string
-	nodeAddress          string
-	localTransferRoot    string
-	transferPollInterval time.Duration
-	transferTimeout      time.Duration
-	mu                   sync.RWMutex
-	podMap               map[string]podJobState // podKey -> job state
-	stagingMap           map[string]*podStagingState
+	sfClientFactory       jobClientFactory
+	tokenResolver         TokenResolver
+	nodeName              string
+	nodeAddress           string
+	nodeAddressAsHostname bool
+	localTransferRoot     string
+	transferPollInterval  time.Duration
+	transferTimeout       time.Duration
+	mu                    sync.RWMutex
+	podMap                map[string]podJobState // podKey -> job state
+	stagingMap            map[string]*podStagingState
 }
 
 type jobClientFactory func(token string) jobClient
@@ -72,7 +74,8 @@ const (
 
 type podJobState struct {
 	jobID string
-	pod   *corev1.Pod
+	// pod is an immutable snapshot, also used as this submission's identity.
+	pod *corev1.Pod
 }
 
 type podStagingState struct {
@@ -151,6 +154,13 @@ func (p *NerscProvider) SetNodeAddress(address string) {
 	if address != "" {
 		p.nodeAddress = address
 	}
+}
+
+// Some distributions reserve Node InternalIPs for their agent tunnels. A numeric
+// Hostname address lets the API server use an independently secured endpoint
+// without registering it as an agent address in those tunnel controllers.
+func (p *NerscProvider) SetNodeAddressAsHostname(enabled bool) {
+	p.nodeAddressAsHostname = enabled
 }
 
 func (p *NerscProvider) SetLocalTransferRoot(root string) {
@@ -277,18 +287,29 @@ func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 
 	key := podKey(pod)
 	if state, exists := p.jobStateForPodKey(key); exists {
-		client, _, err := p.clientForPodState(ctx, key, state)
+		if pod.UID != "" && state.pod != nil && pod.UID != state.pod.UID {
+			return nil // A delayed delete must not cancel a same-name replacement.
+		}
+		client, _, err := p.clientForPodState(ctx, key, &state)
 		if err != nil {
 			return fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 		}
-		err = client.CancelJob(ctx, state.jobID)
+		if cancelling, ok := client.(interface {
+			CancelJobWithResolution(context.Context, string, func(string)) error
+		}); ok {
+			err = cancelling.CancelJobWithResolution(ctx, state.jobID, func(resolved string) {
+				p.retainResolvedJobID(key, &state, resolved)
+			})
+		} else {
+			err = client.CancelJob(ctx, state.jobID)
+		}
 		if err != nil {
 			log.Printf("Failed to cancel job %s for pod %s: %v", state.jobID, key, err)
 			return err
 		}
 
 		p.mu.Lock()
-		if p.podMap[key].jobID == state.jobID {
+		if current, exists := p.podMap[key]; exists && current.pod == state.pod {
 			delete(p.podMap, key)
 			delete(p.stagingMap, key)
 		}
@@ -297,7 +318,9 @@ func (p *NerscProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 		log.Printf("Cancelled job %s for pod %s", state.jobID, key)
 	} else {
 		p.mu.Lock()
-		delete(p.stagingMap, key)
+		if _, exists := p.podMap[key]; !exists {
+			delete(p.stagingMap, key)
+		}
 		p.mu.Unlock()
 	}
 	return nil
@@ -329,7 +352,7 @@ func (p *NerscProvider) clientForToken(token string) (jobClient, error) {
 	return p.sfClientFactory(token), nil
 }
 
-func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state podJobState) (jobClient, string, error) {
+func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state *podJobState) (jobClient, string, error) {
 	if state.pod == nil {
 		return nil, "", fmt.Errorf("pod %s missing stored credential reference", key)
 	}
@@ -341,12 +364,67 @@ func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state
 	if err != nil {
 		return nil, "", err
 	}
+	// SFAPI submission tasks can expire before their compute jobs do. Retain the
+	// resolved Slurm ID in the provider's existing per-Pod state, across clients
+	// and token refreshes, as soon as a task produces it.
+	if current, ok := p.jobStateForPodKey(key); ok && current.pod == state.pod {
+		state.jobID = current.jobID
+	}
+	if resolver, ok := client.(interface {
+		ResolveJobID(context.Context, string) (string, error)
+	}); ok {
+		original := state.jobID
+		resolved, err := resolver.ResolveJobID(ctx, original)
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve submission for pod %s: %w", key, err)
+		}
+		p.retainResolvedJobID(key, state, resolved)
+	}
 	return client, token, nil
+}
+
+// Status polling, log requests, and cancellation can discover a Slurm ID. Persist it
+// against the same submission identity, never against a same-name replacement.
+func (p *NerscProvider) retainResolvedJobID(key string, state *podJobState, resolved string) {
+	original := state.jobID
+	if resolved == "" || resolved == original {
+		return
+	}
+	p.mu.Lock()
+	if current, exists := p.podMap[key]; exists && current.pod == state.pod && current.jobID == original {
+		current.jobID = resolved
+		p.podMap[key] = current
+	}
+	p.mu.Unlock()
+	state.jobID = resolved
+	log.Printf("Pod %s resolved submission %s to Slurm job %s", key, original, resolved)
 }
 
 func (p *NerscProvider) jobIDForPodKey(key string) (string, bool) {
 	state, exists := p.jobStateForPodKey(key)
 	return state.jobID, exists
+}
+
+func (p *NerscProvider) jobStatusForPodState(ctx context.Context, client jobClient, key string, state *podJobState) (string, error) {
+	if resolving, ok := client.(interface {
+		GetJobStatusWithResolution(context.Context, string, func(string)) (string, error)
+	}); ok {
+		return resolving.GetJobStatusWithResolution(ctx, state.jobID, func(resolved string) {
+			p.retainResolvedJobID(key, state, resolved)
+		})
+	}
+	return client.GetJobStatus(ctx, state.jobID)
+}
+
+func (p *NerscProvider) logsForPodState(ctx context.Context, client jobClient, key string, state *podJobState) (string, error) {
+	if resolving, ok := client.(interface {
+		FetchJobLogsWithResolution(context.Context, string, func(string)) (string, error)
+	}); ok {
+		return resolving.FetchJobLogsWithResolution(ctx, state.jobID, func(resolved string) {
+			p.retainResolvedJobID(key, state, resolved)
+		})
+	}
+	return client.FetchJobLogs(ctx, state.jobID)
 }
 
 func (p *NerscProvider) jobStateForPodKey(key string) (podJobState, bool) {
@@ -379,12 +457,12 @@ func (p *NerscProvider) GetPod(ctx context.Context, namespace, name string) (*co
 	if !exists {
 		return nil, fmt.Errorf("pod %s not found", key)
 	}
-	client, token, err := p.clientForPodState(ctx, key, state)
+	client, token, err := p.clientForPodState(ctx, key, &state)
 	if err != nil {
 		return nil, fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 	}
 
-	status, err := client.GetJobStatus(ctx, state.jobID)
+	status, err := p.jobStatusForPodState(ctx, client, key, &state)
 	if err != nil {
 		log.Printf("Failed to get status for pod %s job %s: %v", key, state.jobID, err)
 		return nil, err
@@ -424,12 +502,12 @@ func (p *NerscProvider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 		}
 		namespace, name := parts[0], parts[1]
 
-		client, token, err := p.clientForPodState(ctx, key, state)
+		client, token, err := p.clientForPodState(ctx, key, &state)
 		if err != nil {
 			log.Printf("Failed to create Superfacility client for pod %s: %v", key, err)
 			continue
 		}
-		status, err := client.GetJobStatus(ctx, state.jobID)
+		status, err := p.jobStatusForPodState(ctx, client, key, &state)
 		if err != nil {
 			log.Printf("Failed to get status for job %s: %v", state.jobID, err)
 			continue
@@ -519,15 +597,19 @@ func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, contain
 	if !exists {
 		return nil, fmt.Errorf("pod %s not found", key)
 	}
-	client, _, err := p.clientForPodState(ctx, key, state)
+	client, _, err := p.clientForPodState(ctx, key, &state)
 	if err != nil {
+		var unresolved *superfacility.UnresolvedSubmissionError
+		if errors.As(err, &unresolved) {
+			return io.NopCloser(strings.NewReader(unresolved.Result)), nil
+		}
 		return nil, fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 	}
 	if opts != nil && opts.Follow {
-		return p.followPodLogs(ctx, client, state.jobID), nil
+		return p.followPodLogs(ctx, client, key, state), nil
 	}
 
-	logs, err := client.FetchJobLogs(ctx, state.jobID)
+	logs, err := p.logsForPodState(ctx, client, key, &state)
 	if err != nil {
 		return nil, err
 	}
@@ -535,7 +617,7 @@ func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, contain
 	return io.NopCloser(strings.NewReader(logs)), nil
 }
 
-func (p *NerscProvider) followPodLogs(ctx context.Context, client jobClient, jobID string) io.ReadCloser {
+func (p *NerscProvider) followPodLogs(ctx context.Context, client jobClient, key string, state podJobState) io.ReadCloser {
 	reader, writer := io.Pipe()
 	go func() {
 		defer writer.Close()
@@ -544,13 +626,21 @@ func (p *NerscProvider) followPodLogs(ctx context.Context, client jobClient, job
 		defer ticker.Stop()
 
 		for {
-			status, err := client.GetJobStatus(ctx, jobID)
+			if current, ok := p.jobStateForPodKey(key); ok && current.pod == state.pod {
+				state.jobID = current.jobID
+			}
+			status, err := p.jobStatusForPodState(ctx, client, key, &state)
 			if err != nil {
+				var unresolved *superfacility.UnresolvedSubmissionError
+				if errors.As(err, &unresolved) {
+					_, _ = io.WriteString(writer, unresolved.Result)
+					return
+				}
 				_ = writer.CloseWithError(err)
 				return
 			}
 			if isTerminalJobStatus(status) {
-				logs, err := client.FetchJobLogs(ctx, jobID)
+				logs, err := p.logsForPodState(ctx, client, key, &state)
 				if err != nil {
 					_ = writer.CloseWithError(err)
 					return
@@ -597,6 +687,9 @@ func (p *NerscProvider) NodeAddresses(ctx context.Context) []corev1.NodeAddress 
 	address := strings.TrimSpace(p.nodeAddress)
 	if address == "" {
 		address = "127.0.0.1"
+	}
+	if p.nodeAddressAsHostname {
+		return []corev1.NodeAddress{{Type: corev1.NodeHostName, Address: address}}
 	}
 	return []corev1.NodeAddress{
 		{

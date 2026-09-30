@@ -28,11 +28,8 @@ resources:
 nodeSelector:
   kubernetes.io/os: linux
 
-tolerations:
-- key: "virtual-kubelet.io/provider"
-  operator: "Equal"
-  value: "nersc"
-  effect: "NoSchedule"
+# Provider runs on a physical node; only remote workloads tolerate the VK taint.
+tolerations: []
 
 affinity:
   podAntiAffinity:

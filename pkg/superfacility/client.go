@@ -20,7 +20,8 @@ const maxErrorBodyBytes = 4096
 
 const taskJobRefPrefix = "sfapi-task:"
 
-var slurmJobIDPattern = regexp.MustCompile(`\b[0-9]+(?:_[0-9]+)?\b`)
+var slurmJobIDPattern = regexp.MustCompile(`^[0-9]+(?:_[0-9]+)?$`)
+var submittedJobIDPattern = regexp.MustCompile(`(?i)\bSubmitted batch job ([0-9]+(?:_[0-9]+)?)\b`)
 
 type Client struct {
 	Endpoint string
@@ -204,14 +205,57 @@ func (c *Client) SubmitJob(ctx context.Context, req JobSubmissionRequest) (strin
 	return makeTaskJobRef(req.System, out.TaskID), nil
 }
 
+// UnresolvedSubmissionError preserves diagnostics for a completed submission whose
+// result does not establish a Slurm ID. Logs may return Result; cancellation must
+// still retain tracking until the submission is independently reconciled.
+type UnresolvedSubmissionError struct {
+	TaskID string
+	Result string
+}
+
+func (e *UnresolvedSubmissionError) Error() string {
+	return fmt.Sprintf("task %s completed without a confirmed Slurm job ID", e.TaskID)
+}
+
+// ResolveJobID returns the real Slurm ID when a Perlmutter submission task has
+// completed. Pending tasks keep their reference. Callers must retain the resolved
+// ID because the SFAPI task record can disappear independently of the Slurm job.
+func (c *Client) ResolveJobID(ctx context.Context, jobID string) (string, error) {
+	machine, taskID, ok := parseTaskJobRef(jobID)
+	if !ok {
+		return jobID, nil
+	}
+	if machine != "perlmutter" {
+		return "", fmt.Errorf("job ID resolution only supports perlmutter")
+	}
+	task, err := c.getTask(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(task.Status, "completed") {
+		return jobID, nil
+	}
+	resolved := extractSlurmJobID(task.Result)
+	if resolved == "" {
+		return "", &UnresolvedSubmissionError{TaskID: taskID, Result: task.Result}
+	}
+	return resolved, nil
+}
+
 func (c *Client) GetJobStatus(ctx context.Context, jobID string) (string, error) {
+	return c.GetJobStatusWithResolution(ctx, jobID, nil)
+}
+
+// GetJobStatusWithResolution reports a resolved Slurm ID before querying compute
+// accounting, so callers can retain it even when that query fails.
+func (c *Client) GetJobStatusWithResolution(ctx context.Context, jobID string, onResolved func(string)) (string, error) {
 	if machine, taskID, ok := parseTaskJobRef(jobID); ok {
-		return c.getTaskBackedJobStatus(ctx, machine, taskID)
+		return c.getTaskBackedJobStatus(ctx, machine, taskID, onResolved)
 	}
 	return c.getComputeJobStatus(ctx, "perlmutter", jobID)
 }
 
-func (c *Client) getTaskBackedJobStatus(ctx context.Context, machine, taskID string) (string, error) {
+func (c *Client) getTaskBackedJobStatus(ctx context.Context, machine, taskID string, onResolved func(string)) (string, error) {
 	task, err := c.getTask(ctx, taskID)
 	if err != nil {
 		return "", err
@@ -224,7 +268,10 @@ func (c *Client) getTaskBackedJobStatus(ctx context.Context, machine, taskID str
 	case "completed":
 		slurmJobID := extractSlurmJobID(task.Result)
 		if slurmJobID == "" {
-			return "", fmt.Errorf("task %s completed but result did not contain a Slurm job id: %q", taskID, task.Result)
+			return "", &UnresolvedSubmissionError{TaskID: taskID, Result: task.Result}
+		}
+		if onResolved != nil {
+			onResolved(slurmJobID)
 		}
 		return c.getComputeJobStatus(ctx, machine, slurmJobID)
 	default:
@@ -320,11 +367,52 @@ func (c *Client) getComputeJobOutput(ctx context.Context, machine, jobID string)
 }
 
 func (c *Client) CancelJob(ctx context.Context, jobID string) error {
-	if _, taskID, ok := parseTaskJobRef(jobID); ok {
-		return c.cancelTask(ctx, taskID)
+	return c.CancelJobWithResolution(ctx, jobID, nil)
+}
+
+// CancelJobWithResolution reports the compute ID synchronously before any
+// compute-status or cancellation request. Callers can retain that ID even when
+// cancellation later fails and the submission task expires. A nil callback is
+// allowed. The callback must not block on cancellation completing.
+func (c *Client) CancelJobWithResolution(ctx context.Context, jobID string, onResolved func(string)) error {
+	// A submission task is not the Slurm allocation. Wait for its result instead
+	// of deleting it: otherwise completion racing with deletion can orphan a job.
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	machine := "perlmutter"
+	if taskMachine, taskID, ok := parseTaskJobRef(jobID); ok {
+		machine = taskMachine
+		for {
+			task, err := c.getTask(ctx, taskID)
+			if err != nil {
+				return err
+			}
+			if resolved := extractSlurmJobID(task.Result); strings.EqualFold(task.Status, "completed") && resolved != "" {
+				jobID = resolved
+				break
+			}
+			switch strings.ToLower(strings.TrimSpace(task.Status)) {
+			case "completed", "failed", "cancelled", "canceled":
+				return fmt.Errorf("submission task %s ended without a confirmed Slurm job ID; independent reconciliation required", taskID)
+			}
+			if err := waitCancellationPoll(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	if onResolved != nil {
+		onResolved(jobID)
+	}
+	accounting := cancellationAccounting{jobID: jobID, observed: make(map[string]struct{})}
+	confirmed, err := c.confirmCancellation(ctx, machine, &accounting)
+	if err != nil {
+		return err
+	}
+	if confirmed {
+		return nil
 	}
 
-	req, err := c.newRequest(ctx, http.MethodDelete, fmt.Sprintf("compute/jobs/perlmutter/%s", url.PathEscape(jobID)), nil)
+	req, err := c.newRequest(ctx, http.MethodDelete, fmt.Sprintf("compute/jobs/%s/%s", url.PathEscape(machine), url.PathEscape(jobID)), nil)
 	if err != nil {
 		return err
 	}
@@ -335,10 +423,37 @@ func (c *Client) CancelJob(ctx context.Context, jobID string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("cancel failed: %s", responseError(resp))
 	}
-	return nil
+	// Do not discard the provider mapping until accounting confirms termination.
+	for {
+		confirmed, err = c.confirmCancellation(ctx, machine, &accounting)
+		if err != nil {
+			return err
+		}
+		if confirmed {
+			return nil
+		}
+		if err := waitCancellationPoll(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+func waitCancellationPoll(ctx context.Context) error {
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func terminalComputeStatus(status string) bool {
+	return status == "completed" || status == "failed"
 }
 
 func (c *Client) cancelTask(ctx context.Context, taskID string) error {
@@ -360,6 +475,12 @@ func (c *Client) cancelTask(ctx context.Context, taskID string) error {
 }
 
 func (c *Client) FetchJobLogs(ctx context.Context, jobID string) (string, error) {
+	return c.FetchJobLogsWithResolution(ctx, jobID, nil)
+}
+
+// FetchJobLogsWithResolution reports a resolved Slurm ID before querying compute
+// accounting or downloading logs, so callers can retain it even on failure.
+func (c *Client) FetchJobLogsWithResolution(ctx context.Context, jobID string, onResolved func(string)) (string, error) {
 	machine := "perlmutter"
 	slurmJobID := jobID
 	if taskMachine, taskID, ok := parseTaskJobRef(jobID); ok {
@@ -373,6 +494,9 @@ func (c *Client) FetchJobLogs(ctx context.Context, jobID string) (string, error)
 			slurmJobID = extractSlurmJobID(task.Result)
 			if slurmJobID == "" {
 				return task.Result, nil
+			}
+			if onResolved != nil {
+				onResolved(slurmJobID)
 			}
 		case "failed", "cancelled", "canceled":
 			return task.Result, nil
@@ -687,7 +811,32 @@ func parseTaskJobRef(ref string) (string, string, bool) {
 }
 
 func extractSlurmJobID(result string) string {
-	return slurmJobIDPattern.FindString(result)
+	result = strings.TrimSpace(result)
+	if slurmJobIDPattern.MatchString(result) {
+		return result
+	}
+	var payload map[string]any
+	decoder := json.NewDecoder(strings.NewReader(result))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err == nil {
+		if value := payload["error"]; value != nil && value != "" {
+			return ""
+		}
+		if strings.EqualFold(fmt.Sprint(payload["status"]), "error") {
+			return ""
+		}
+		for _, field := range []string{"jobid", "job_id"} {
+			value := fmt.Sprint(payload[field])
+			if slurmJobIDPattern.MatchString(value) {
+				return value
+			}
+		}
+		return ""
+	}
+	if match := submittedJobIDPattern.FindStringSubmatch(result); len(match) == 2 {
+		return match[1]
+	}
+	return ""
 }
 
 func statusFromJobOutput(rows []map[string]string) string {
@@ -746,6 +895,9 @@ func escapeRemotePath(remotePath string) string {
 
 func normalizeSlurmStatus(status string) string {
 	status = strings.ToUpper(strings.TrimSpace(status))
+	if fields := strings.Fields(status); len(fields) > 0 {
+		status = strings.TrimSuffix(fields[0], "+")
+	}
 	switch status {
 	case "PD", "PENDING", "CONFIGURING":
 		return "pending"
@@ -753,9 +905,12 @@ func normalizeSlurmStatus(status string) string {
 		return "running"
 	case "CD", "COMPLETED", "COMPLETED+":
 		return "completed"
-	case "F", "FAILED", "CA", "CANCELLED", "CANCELED", "TO", "TIMEOUT", "NF", "NODE_FAIL", "OOM", "OUT_OF_MEMORY":
+	case "F", "FAILED", "CA", "CANCELLED", "CANCELED", "TO", "TIMEOUT", "NF", "NODE_FAIL", "OOM", "OUT_OF_MEMORY", "BF", "BOOT_FAIL", "DL", "DEADLINE":
 		return "failed"
 	default:
+		// PREEMPTED can transition to requeued work; REVOKED can describe a
+		// federated sibling running elsewhere. Neither alone proves shutdown.
+		// https://slurm.schedmd.com/job_state_codes.html
 		return strings.ToLower(status)
 	}
 }

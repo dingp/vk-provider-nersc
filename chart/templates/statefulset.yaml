@@ -39,6 +39,11 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: {{ .Values.statefulset.nodeSelector | quote }}
+      tolerations:
+      - key: virtual-kubelet.io/provider
+        operator: Equal
+        value: nersc
+        effect: NoSchedule
       containers:
       - name: {{ .Values.statefulset.container.name }}
         image: {{ .Values.statefulset.container.image | quote }}

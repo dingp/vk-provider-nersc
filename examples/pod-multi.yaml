@@ -7,8 +7,14 @@ metadata:
     nersc.sf/credentialSecretName: "sfapi-client"
     nersc.vk/mainContainer: "worker"
 spec:
+  restartPolicy: Never
   nodeSelector:
     kubernetes.io/hostname: perlmutter-vk
+  tolerations:
+  - key: virtual-kubelet.io/provider
+    operator: Equal
+    value: nersc
+    effect: NoSchedule
   containers:
   - name: worker
     image: registry.example.com/worker:latest

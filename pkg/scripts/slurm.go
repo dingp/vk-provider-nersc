@@ -196,7 +196,9 @@ func slurmOptionsFromPod(pod *corev1.Pod) (slurmOptions, error) {
 	if opts.Account, err = safeStringAnnotation(pod, annotationAccount, "", safeSlurmValuePattern); err != nil {
 		return slurmOptions{}, err
 	}
-	opts.WorkDir = annotationValue(pod, annotationWorkDir)
+	if opts.WorkDir, err = safeStringAnnotation(pod, annotationWorkDir, "", safeSlurmValuePattern); err != nil {
+		return slurmOptions{}, err
+	}
 	if opts.Output, err = safeStringAnnotation(pod, annotationOutput, opts.Output, safeSlurmValuePattern); err != nil {
 		return slurmOptions{}, err
 	}

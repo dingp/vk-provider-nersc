@@ -8,9 +8,22 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const DefaultTransferAPIURL = "https://transfer.api.globus.org/v0.10/"
+
+// DefaultHTTPTimeout bounds a single Globus Auth or Transfer API request.
+// Transfers are polled, so a stalled endpoint must not block pod creation
+// indefinitely.
+const DefaultHTTPTimeout = 30 * time.Second
+
+// DefaultHTTPClient returns an HTTP client with a finite per-request timeout.
+// Callers that need custom transport settings should pass their own client to
+// the WithOptions constructors.
+func DefaultHTTPClient() *http.Client {
+	return &http.Client{Timeout: DefaultHTTPTimeout}
+}
 
 type TokenSource interface {
 	Token(context.Context) (string, error)
@@ -63,7 +76,7 @@ func (t Task) Summary() string {
 }
 
 func NewClient(tokenSource TokenSource) (*Client, error) {
-	return NewClientWithOptions(DefaultTransferAPIURL, tokenSource, http.DefaultClient)
+	return NewClientWithOptions(DefaultTransferAPIURL, tokenSource, DefaultHTTPClient())
 }
 
 func NewClientWithOptions(baseURL string, tokenSource TokenSource, httpClient *http.Client) (*Client, error) {
@@ -81,7 +94,7 @@ func NewClientWithOptions(baseURL string, tokenSource TokenSource, httpClient *h
 		return nil, fmt.Errorf("Globus token source is required")
 	}
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = DefaultHTTPClient()
 	}
 	return &Client{baseURL: parsed, tokenSource: tokenSource, httpClient: httpClient}, nil
 }
@@ -209,15 +222,21 @@ func (c *Client) doJSON(ctx context.Context, method, resource string, body any, 
 func responseError(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	var apiErr struct {
-		Code           string   `json:"code"`
-		Message        string   `json:"message"`
-		RequiredScopes []string `json:"required_scopes"`
+		Code                    string   `json:"code"`
+		Message                 string   `json:"message"`
+		RequiredScopes          []string `json:"required_scopes"`
+		AuthorizationParameters struct {
+			RequiredScopes []string `json:"required_scopes"`
+		} `json:"authorization_parameters"`
 	}
 	if json.Unmarshal(data, &apiErr) == nil {
 		message := firstNonEmpty(apiErr.Message, apiErr.Code)
 		if message != "" {
-			if len(apiErr.RequiredScopes) > 0 {
-				message += "; required scopes: " + strings.Join(apiErr.RequiredScopes, " ")
+			// Globus Auth Requirements errors report the dependent scopes under
+			// authorization_parameters; other endpoints use the top-level field.
+			scopes := mergeScopes(apiErr.RequiredScopes, apiErr.AuthorizationParameters.RequiredScopes)
+			if len(scopes) > 0 {
+				message += "; required scopes: " + strings.Join(scopes, " ")
 			}
 			return fmt.Errorf("Globus API returned %s: %s", resp.Status, message)
 		}
@@ -227,6 +246,25 @@ func responseError(resp *http.Response) error {
 		message = http.StatusText(resp.StatusCode)
 	}
 	return fmt.Errorf("Globus API returned %s: %s", resp.Status, message)
+}
+
+func mergeScopes(groups ...[]string) []string {
+	var merged []string
+	seen := make(map[string]struct{})
+	for _, group := range groups {
+		for _, scope := range group {
+			scope = strings.TrimSpace(scope)
+			if scope == "" {
+				continue
+			}
+			if _, ok := seen[scope]; ok {
+				continue
+			}
+			seen[scope] = struct{}{}
+			merged = append(merged, scope)
+		}
+	}
+	return merged
 }
 
 func firstNonEmpty(values ...string) string {

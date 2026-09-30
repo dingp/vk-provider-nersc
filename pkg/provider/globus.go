@@ -66,7 +66,7 @@ func NewSecretGlobusClientResolver(secrets coreclientv1.SecretsGetter) *SecretGl
 		secrets:        secrets,
 		authTokenURL:   globusapi.DefaultAuthTokenURL,
 		transferAPIURL: globusapi.DefaultTransferAPIURL,
-		httpClient:     http.DefaultClient,
+		httpClient:     globusapi.DefaultHTTPClient(),
 		clients:        make(map[string]cachedGlobusClient),
 	}
 }

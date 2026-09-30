@@ -491,7 +491,7 @@ func TestCreatePodStagesInputBeforeSubmittingJob(t *testing.T) {
 	if err := provider.CreatePod(context.Background(), pod); err != nil {
 		t.Fatalf("CreatePod returned error: %v", err)
 	}
-	if got, want := strings.Join(client.operations, ","), "start-transfer,check-transfer,submit"; got != want {
+	if got, want := strings.Join(client.operations, ","), "start-transfer,check-transfer,run-command,submit"; got != want {
 		t.Fatalf("operations = %s, want %s", got, want)
 	}
 	if len(globusClient.requests) != 1 {
@@ -529,11 +529,15 @@ func TestCreatePodStagesInputWithSFAPITransferMode(t *testing.T) {
 	if err := provider.CreatePod(context.Background(), pod); err != nil {
 		t.Fatalf("CreatePod returned error: %v", err)
 	}
-	if got, want := strings.Join(client.operations, ","), "run-command,upload-file,submit"; got != want {
+	if got, want := strings.Join(client.operations, ","), "run-command,upload-file,run-command,submit"; got != want {
 		t.Fatalf("operations = %s, want %s", got, want)
 	}
-	if len(client.commandReqs) != 1 || client.commandReqs[0] != `perlmutter:bash -c 'mkdir -p -- '"'"'/pscratch/sd/a/alice/vk-provider-nersc/demo/data'"'"''` {
-		t.Fatalf("command requests = %+v", client.commandReqs)
+	wantCommands := []string{
+		`perlmutter:bash -c 'mkdir -p -- '"'"'/pscratch/sd/a/alice/vk-provider-nersc/demo/data'"'"''`,
+		`perlmutter:bash -c 'mkdir -p -- '"'"'/pscratch/sd/a/alice/vk-provider-nersc/demo'"'"''`,
+	}
+	if !slices.Equal(client.commandReqs, wantCommands) {
+		t.Fatalf("command requests = %+v, want %+v", client.commandReqs, wantCommands)
 	}
 	if len(client.uploadReqs) != 1 {
 		t.Fatalf("upload request count = %d, want 1", len(client.uploadReqs))
@@ -550,6 +554,70 @@ func TestCreatePodStagesInputWithSFAPITransferMode(t *testing.T) {
 	}
 	if req.contents != "payload" {
 		t.Fatalf("contents = %q", req.contents)
+	}
+}
+
+func TestCreatePodCreatesWorkDirBeforeSubmittingJob(t *testing.T) {
+	t.Setenv("USER", "alice")
+
+	client := &fakeJobClient{submitJobID: "job-1"}
+	provider := newTestProvider(client)
+	pod := testPod()
+	pod.Annotations[annotationScratchBase] = "/pscratch/sd/a/alice/vk-provider-nersc"
+	pod.Spec.Volumes = []corev1.Volume{{Name: "data"}}
+	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "data", MountPath: "/mnt/data"}}
+
+	if err := provider.CreatePod(context.Background(), pod); err != nil {
+		t.Fatalf("CreatePod returned error: %v", err)
+	}
+	if got, want := strings.Join(client.operations, ","), "run-command,submit"; got != want {
+		t.Fatalf("operations = %s, want %s", got, want)
+	}
+	wantCommand := `perlmutter:bash -c 'mkdir -p -- '"'"'/pscratch/sd/a/alice/vk-provider-nersc/demo'"'"''`
+	if !slices.Equal(client.commandReqs, []string{wantCommand}) {
+		t.Fatalf("command requests = %+v, want %q", client.commandReqs, wantCommand)
+	}
+	if workdir := pod.Annotations["nersc.slurm/workdir"]; workdir != "/pscratch/sd/a/alice/vk-provider-nersc/demo" {
+		t.Fatalf("workdir annotation = %q", workdir)
+	}
+	if !strings.Contains(client.submitReq.Script, "#SBATCH --chdir=/pscratch/sd/a/alice/vk-provider-nersc/demo\n") {
+		t.Fatalf("script missing --chdir:\n%s", client.submitReq.Script)
+	}
+}
+
+func TestCreatePodSkipsWorkDirCreationWithoutStaging(t *testing.T) {
+	client := &fakeJobClient{submitJobID: "job-1"}
+	provider := newTestProvider(client)
+	pod := testPod()
+
+	if err := provider.CreatePod(context.Background(), pod); err != nil {
+		t.Fatalf("CreatePod returned error: %v", err)
+	}
+	if got, want := strings.Join(client.operations, ","), "submit"; got != want {
+		t.Fatalf("operations = %s, want %s", got, want)
+	}
+	if _, ok := pod.Annotations["nersc.slurm/workdir"]; ok {
+		t.Fatalf("workdir annotation = %q, want none for unexpandable scratch base", pod.Annotations["nersc.slurm/workdir"])
+	}
+}
+
+func TestCreatePodKeepsExplicitWorkDir(t *testing.T) {
+	t.Setenv("USER", "alice")
+
+	client := &fakeJobClient{submitJobID: "job-1"}
+	provider := newTestProvider(client)
+	pod := testPod()
+	pod.Annotations[annotationScratchBase] = "/pscratch/sd/a/alice/vk-provider-nersc"
+	pod.Annotations["nersc.slurm/workdir"] = "/pscratch/sd/a/alice/explicit"
+
+	if err := provider.CreatePod(context.Background(), pod); err != nil {
+		t.Fatalf("CreatePod returned error: %v", err)
+	}
+	if got, want := strings.Join(client.operations, ","), "submit"; got != want {
+		t.Fatalf("operations = %s, want %s", got, want)
+	}
+	if workdir := pod.Annotations["nersc.slurm/workdir"]; workdir != "/pscratch/sd/a/alice/explicit" {
+		t.Fatalf("workdir annotation = %q, want explicit workdir", workdir)
 	}
 }
 
@@ -651,7 +719,7 @@ func TestGetPodStatusStagesOutputWithSFAPITransferMode(t *testing.T) {
 	if status.Phase != corev1.PodSucceeded || status.Reason != "StageOutComplete" {
 		t.Fatalf("status = %s/%s, want Succeeded/StageOutComplete", status.Phase, status.Reason)
 	}
-	if got, want := strings.Join(client.operations, ","), "submit,download-file"; got != want {
+	if got, want := strings.Join(client.operations, ","), "run-command,submit,download-file"; got != want {
 		t.Fatalf("operations = %s, want %s", got, want)
 	}
 	if len(client.downloadReqs) != 1 || client.downloadReqs[0] != "perlmutter:/pscratch/sd/a/alice/vk-provider-nersc/demo/results/output.txt" {

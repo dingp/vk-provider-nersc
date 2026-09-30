@@ -76,7 +76,7 @@ func (s *StaticTokenSource) Token(context.Context) (string, error) {
 }
 
 func NewClientCredentialsTokenSource(clientID, clientSecret string) (*ClientCredentialsTokenSource, error) {
-	return NewClientCredentialsTokenSourceWithScopeOptions(clientID, clientSecret, TransferScope, DefaultAuthTokenURL, http.DefaultClient)
+	return NewClientCredentialsTokenSourceWithScopeOptions(clientID, clientSecret, TransferScope, DefaultAuthTokenURL, DefaultHTTPClient())
 }
 
 func NewClientCredentialsTokenSourceWithOptions(clientID, clientSecret, tokenURL string, httpClient *http.Client) (*ClientCredentialsTokenSource, error) {
@@ -101,7 +101,7 @@ func NewClientCredentialsTokenSourceWithScopeOptions(clientID, clientSecret, sco
 		return nil, fmt.Errorf("invalid Globus Auth token URL")
 	}
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = DefaultHTTPClient()
 	}
 	return &ClientCredentialsTokenSource{
 		clientID: clientID, clientSecret: clientSecret, scope: scope, tokenURL: parsed.String(), httpClient: httpClient, now: time.Now,
@@ -109,7 +109,7 @@ func NewClientCredentialsTokenSourceWithScopeOptions(clientID, clientSecret, sco
 }
 
 func NewRefreshTokenSource(clientID, clientSecret, refreshToken string) (*RefreshTokenSource, error) {
-	return NewRefreshTokenSourceWithOptions(clientID, clientSecret, refreshToken, DefaultAuthTokenURL, http.DefaultClient)
+	return NewRefreshTokenSourceWithOptions(clientID, clientSecret, refreshToken, DefaultAuthTokenURL, DefaultHTTPClient())
 }
 
 func NewRefreshTokenSourceWithOptions(clientID, clientSecret, refreshToken, tokenURL string, httpClient *http.Client) (*RefreshTokenSource, error) {
@@ -130,7 +130,7 @@ func NewRefreshTokenSourceWithOptions(clientID, clientSecret, refreshToken, toke
 		return nil, err
 	}
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = DefaultHTTPClient()
 	}
 	return &RefreshTokenSource{
 		clientID: clientID, clientSecret: clientSecret, refreshToken: refreshToken,

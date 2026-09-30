@@ -57,6 +57,8 @@ const (
 	defaultTransferPollInterval = 15 * time.Second
 	defaultTransferTimeout      = 30 * time.Minute
 
+	perlmutterMachine = "perlmutter"
+
 	annotationTokenSecretName = "nersc.sf/tokenSecretName"
 	annotationTokenSecretKey  = "nersc.sf/tokenSecretKey"
 	annotationSlurmAccount    = "nersc.slurm/account"
@@ -234,6 +236,13 @@ func (p *NerscProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 		pod.Annotations["nersc.slurm/output"] = pod.Name + ".out"
 	}
 	if pod.Annotations["nersc.slurm/workdir"] == "" && path.IsAbs(jobScratchBase) && !strings.Contains(jobScratchBase, "$") {
+		// Slurm applies --chdir before the batch script runs, so the in-script
+		// volume setup cannot create this directory first. Stage-in may have
+		// created it already, but pods without staging have nothing else that
+		// would, and the job would fail before executing.
+		if err := p.createRemoteDir(ctx, client, jobScratchBase); err != nil {
+			return fmt.Errorf("create job scratch directory %s for pod %s: %w", jobScratchBase, key, err)
+		}
 		pod.Annotations["nersc.slurm/workdir"] = jobScratchBase
 	}
 

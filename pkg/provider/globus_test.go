@@ -149,7 +149,7 @@ func TestGlobusCredentialRefreshTokenRequiresClientCredentials(t *testing.T) {
 }
 
 func TestGlobusResolverSelectsTokenSourceByCredentialType(t *testing.T) {
-	resolver := &SecretGlobusClientResolver{authTokenURL: globusapi.DefaultAuthTokenURL, httpClient: http.DefaultClient}
+	resolver := &SecretGlobusClientResolver{authTokenURL: globusapi.DefaultAuthTokenURL, httpClient: globusapi.DefaultHTTPClient()}
 
 	bearer, err := resolver.tokenSourceForCredential(globusCredentialFile{BearerToken: "bearer-token"}, globusapi.TransferScope)
 	if err != nil {

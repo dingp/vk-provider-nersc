@@ -123,5 +123,5 @@ For compatibility, Globus mode still accepts the legacy `nersc.sf/inputSource` a
 
 - Use collection UUIDs, not SFAPI shortcuts such as `dtn`, `hpss`, or `perlmutter`.
 - The client identity must have permission on both source and destination collections and the underlying paths. NERSC mapped collections may require coordination with NERSC or a collection configured for the application identity.
-- GCS v5 mapped collections can require dependent `data_access` scopes. If Globus returns `ConsentRequired`, copy its `required_scopes` value to `globus.api/scope` after ensuring the client identity is authorized.
+- GCS v5 mapped collections can require dependent `data_access` scopes. If Globus returns `ConsentRequired`, the error message includes the scopes Globus reported (under `authorization_parameters.required_scopes`); copy them to `globus.api/scope` after ensuring the client identity is authorized.
 - Omit staging annotations when inputs and outputs already reside on scratch.

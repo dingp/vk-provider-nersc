@@ -94,3 +94,77 @@ func TestClientIncludesGlobusAPIError(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestClientReportsRequiredScopesFromGlobusAuthError(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "authorization parameters",
+			body: `{"code":"ConsentRequired","message":"missing dependent scope",` +
+				`"authorization_parameters":{"required_scopes":["urn:globus:auth:scope:transfer.api.globus.org:all"]}}`,
+			want: []string{"urn:globus:auth:scope:transfer.api.globus.org:all"},
+		},
+		{
+			name: "top level",
+			body: `{"code":"PermissionDenied","message":"denied",` +
+				`"required_scopes":["scope-one","scope-two"]}`,
+			want: []string{"scope-one", "scope-two"},
+		},
+		{
+			name: "merged without duplicates",
+			body: `{"code":"ConsentRequired","message":"denied","required_scopes":["scope-one"],` +
+				`"authorization_parameters":{"required_scopes":["scope-one","scope-two"]}}`,
+			want: []string{"scope-one", "scope-two"},
+		},
+		{
+			name: "no scopes",
+			body: `{"code":"PermissionDenied","message":"denied"}`,
+			want: nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			client, err := NewClientWithOptions(server.URL+"/v0.10/", staticTokenSource("token"), server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = client.GetTask(context.Background(), "task-1")
+			if err == nil {
+				t.Fatal("GetTask returned nil error")
+			}
+			if test.want == nil {
+				if strings.Contains(err.Error(), "required scopes") {
+					t.Fatalf("error = %v, want no scope list", err)
+				}
+				return
+			}
+			for _, scope := range test.want {
+				if !strings.Contains(err.Error(), scope) {
+					t.Fatalf("error = %v, want scope %q", err, scope)
+				}
+			}
+			if !strings.Contains(err.Error(), "required scopes") {
+				t.Fatalf("error = %v, want required scopes summary", err)
+			}
+		})
+	}
+}
+
+func TestDefaultHTTPClientHasTimeout(t *testing.T) {
+	if DefaultHTTPClient().Timeout != DefaultHTTPTimeout {
+		t.Fatalf("timeout = %s, want %s", DefaultHTTPClient().Timeout, DefaultHTTPTimeout)
+	}
+	if DefaultHTTPClient() == DefaultHTTPClient() {
+		t.Fatal("DefaultHTTPClient returns a shared client")
+	}
+}

@@ -158,6 +158,7 @@ func TestSecretTokenResolverReadsSFAPIBearerTokenKeys(t *testing.T) {
 		key  string
 	}{
 		{name: "bearer token", key: defaultBearerTokenSecretKey},
+		{name: "deprecated token key", key: legacyTokenSecretKey},
 	}
 
 	for _, tt := range tests {
@@ -184,6 +185,29 @@ func TestSecretTokenResolverReadsSFAPIBearerTokenKeys(t *testing.T) {
 				t.Fatalf("token = %q", token)
 			}
 		})
+	}
+}
+
+func TestSecretTokenResolverPrefersBearerTokenOverDeprecatedTokenKey(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sf-job-token", Namespace: "workloads"},
+		Data: map[string][]byte{
+			defaultBearerTokenSecretKey: []byte("bearer-token"),
+			legacyTokenSecretKey:        []byte("legacy-token"),
+		},
+	})
+	resolver := NewSecretTokenResolver(client.CoreV1())
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "demo", Namespace: "workloads",
+		Annotations: map[string]string{annotationTokenSecretName: "sf-job-token"},
+	}}
+
+	token, err := resolver.TokenForPod(context.Background(), pod)
+	if err != nil {
+		t.Fatalf("TokenForPod returned error: %v", err)
+	}
+	if token != "bearer-token" {
+		t.Fatalf("token = %q, want bearer-token", token)
 	}
 }
 

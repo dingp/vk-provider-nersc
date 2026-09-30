@@ -292,9 +292,8 @@ func (p *NerscProvider) stageInput(ctx context.Context, client jobClient, key st
 			return fmt.Errorf("stage input for pod %s: %s is a directory; SFAPI transfer mode supports single files", key, localPath)
 		}
 		targetDir := path.Dir(staging.inputTargetPath)
-		command := "bash -c " + remoteShellQuote("mkdir -p -- "+remoteShellQuote(targetDir))
-		if _, err := client.RunCommand(ctx, "perlmutter", command); err != nil {
-			return fmt.Errorf("stage input for pod %s: create remote directory %s: %w", key, targetDir, err)
+		if err := p.createRemoteDir(ctx, client, targetDir); err != nil {
+			return fmt.Errorf("stage input for pod %s: %w", key, err)
 		}
 		if err := client.UploadFile(ctx, "perlmutter", staging.inputTargetPath, filepath.Base(localPath), file); err != nil {
 			return fmt.Errorf("stage input for pod %s: upload %s to %s: %w", key, localPath, staging.inputTargetPath, err)
@@ -500,6 +499,20 @@ func (p *NerscProvider) resolveLocalTransferPath(raw string) (string, error) {
 		return "", fmt.Errorf("local transfer path %q escapes SFAPI_TRANSFER_LOCAL_ROOT", raw)
 	}
 	return candidate, nil
+}
+
+// createRemoteDir makes dir on the Perlmutter login nodes. Paths are shell
+// quoted so callers can pass paths containing spaces.
+func (p *NerscProvider) createRemoteDir(ctx context.Context, client jobClient, dir string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return fmt.Errorf("remote directory is required")
+	}
+	command := "bash -c " + remoteShellQuote("mkdir -p -- "+remoteShellQuote(dir))
+	if _, err := client.RunCommand(ctx, perlmutterMachine, command); err != nil {
+		return fmt.Errorf("create remote directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 func remoteShellQuote(value string) string {

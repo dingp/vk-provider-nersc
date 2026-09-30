@@ -269,6 +269,27 @@ func TestSlurmAnnotationValidationRejectsUnsafeValues(t *testing.T) {
 	}
 }
 
+func TestSlurmAnnotationValidationRejectsUnsafeWorkDir(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "unsafe-workdir",
+			Annotations: map[string]string{
+				"nersc.slurm/workdir": "/scratch/jobs/demo\nrm -rf /pscratch/sd/a/alice",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "image"}},
+		},
+	}
+
+	if _, err := PodToSlurmPodmanWithVolumes(pod, nil); err == nil || !strings.Contains(err.Error(), "nersc.slurm/workdir") {
+		t.Fatalf("error = %v, want workdir validation error", err)
+	}
+	if _, err := PodToSlurmPodmanMultiWithVolumes(pod, nil); err == nil || !strings.Contains(err.Error(), "nersc.slurm/workdir") {
+		t.Fatalf("multi-container error = %v, want workdir validation error", err)
+	}
+}
+
 func TestSlurmAnnotationValidationRejectsConflictingGPUFields(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

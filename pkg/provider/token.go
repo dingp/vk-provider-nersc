@@ -24,6 +24,10 @@ const (
 	defaultSecretJWKKey        = "secret"
 
 	defaultBearerTokenSecretKey = "bearer_token"
+
+	// legacyTokenSecretKey is the deprecated implicit raw-token key, still
+	// checked after defaultBearerTokenSecretKey for pre-bearer_token Secrets.
+	legacyTokenSecretKey = "token"
 )
 
 type bearerTokenSource interface {
@@ -251,6 +255,12 @@ func bearerTokenFromSecret(secret *corev1.Secret, requestedKey string) (string, 
 
 	if data, ok := secret.Data[defaultBearerTokenSecretKey]; ok {
 		return validateBearerToken(secret, defaultBearerTokenSecretKey, string(data))
+	}
+	// Deprecated: the implicit raw-token key before bearer_token. Pods using the
+	// legacy nersc.sf/tokenSecretName annotation relied on this, so keep it as a
+	// fallback instead of failing with a client-credential error.
+	if data, ok := secret.Data[legacyTokenSecretKey]; ok {
+		return validateBearerToken(secret, legacyTokenSecretKey, string(data))
 	}
 	return "", false, nil
 }

@@ -45,7 +45,7 @@ func (r unreadableInput) Read([]byte) (int, error) {
 
 func TestInvalidArgumentsBeforeAuthentication(t *testing.T) {
 	digest := strings.Repeat("a", 64)
-	for _, args := range [][]string{
+	invalidArgs := [][]string{
 		nil, {"unknown"}, {"check", "extra"}, {"job"}, {"job", "../1"}, {"job", "1", "extra"},
 		{"task", "../task"}, {"cancel", "abc"}, {"cancel", "sfapi-task:other:task1"},
 		{"gpu-preflight", "project"}, {"gpu-preflight", "project;id", "debug"}, {"gpu-preflight", "project", "debug\nwhoami"},
@@ -54,7 +54,13 @@ func TestInvalidArgumentsBeforeAuthentication(t *testing.T) {
 		{"prepare-image", "image@sha256:" + strings.Repeat("g", 64)},
 		{"prepare-image", "-image@sha256:" + digest}, {"prepare-image", "image@sha256:" + digest + "\n"},
 		{"prepare-image", "image@sha256:" + digest + ";id"},
-	} {
+	}
+	for _, op := range []string{"job", "cancel"} {
+		for _, id := range []string{"_7", "12345_", "12345__7", "12345_7_1", "12345_a", "12345_-7", "12345_[1-3]", "12345_7;id", "12345_7\n"} {
+			invalidArgs = append(invalidArgs, []string{op, id})
+		}
+	}
+	for _, args := range invalidArgs {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			connect := func(context.Context, io.Reader) (probeClient, error) {
 				t.Fatal("invalid arguments authenticated")
@@ -75,14 +81,18 @@ func TestProbeDispatch(t *testing.T) {
 	}{
 		{args: []string{"check"}, paths: []string{"/account", "/account/projects"}},
 		{args: []string{"job", "12345"}, paths: []string{"/compute/jobs/perlmutter/12345?sacct=true&cached=false"}},
+		{args: []string{"job", "12345_7"}, paths: []string{"/compute/jobs/perlmutter/12345_7?sacct=true&cached=false"}},
+		{args: []string{"job", "12345_0"}, paths: []string{"/compute/jobs/perlmutter/12345_0?sacct=true&cached=false"}},
 		{args: []string{"task", "task-123"}, paths: []string{"/tasks/task-123"}},
 		{args: []string{"cancel", "12345"}, cancel: "12345"},
+		{args: []string{"cancel", "12345_7"}, cancel: "12345_7"},
+		{args: []string{"cancel", "12345_0"}, cancel: "12345_0"},
 		{args: []string{"cancel", "sfapi-task:perlmutter:task-1"}, cancel: "sfapi-task:perlmutter:task-1"},
 		{args: []string{"gpu-preflight", "project_1", "debug"}, command: "perlmutter:set -eu; sbatch --test-only --account=project_1 --qos=debug --constraint=gpu --nodes=1 --ntasks=1 --cpus-per-task=2 --gpus-per-node=4 --time=00:05:00 --mem=4G --wrap=true"},
 		{args: []string{"preflight", "/pscratch/sd/u/user"}, command: "test -w '/pscratch/sd/u/user'"},
 		{args: []string{"prepare-image", image}, command: "perlmutter:podman-hpc pull '" + image + "' && podman-hpc images"},
 	} {
-		t.Run(tc.args[0]+tc.cancel, func(t *testing.T) {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			client := &fakeProbeClient{result: `{"status":"ok","exit_code":0,"output":"done","error":"estimated start"}`}
 			var out bytes.Buffer
 			if err := runProbe(tc.args, strings.NewReader(""), &out, probeConnector(client)); err != nil {

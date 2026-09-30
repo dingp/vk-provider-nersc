@@ -22,8 +22,8 @@ var (
 	slurmName   = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	scratchPath = regexp.MustCompile(`^/[A-Za-z0-9_./-]+$`)
 	taskID      = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-	jobID       = regexp.MustCompile(`^[0-9]+$`)
-	cancelID    = regexp.MustCompile(`^(?:[0-9]+|sfapi-task:perlmutter:[A-Za-z0-9_-]+)$`)
+	jobID       = regexp.MustCompile(`^[0-9]+(?:_[0-9]+)?$`)
+	cancelID    = regexp.MustCompile(`^(?:[0-9]+(?:_[0-9]+)?|sfapi-task:perlmutter:[A-Za-z0-9_-]+)$`)
 	// A repository (optionally registry:port and tag) followed by a full SHA256.
 	imageComponent = `[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*`
 	pinnedImage    = regexp.MustCompile(`^(?:[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*(?::[0-9]+)?/)?` + imageComponent + `(?:/` + imageComponent + `)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[a-f0-9]{64}$`)
@@ -86,7 +86,7 @@ func validateArgs(args []string) error {
 		}
 	case "job":
 		if !jobID.MatchString(args[1]) {
-			return fmt.Errorf("job requires a numeric Slurm ID")
+			return fmt.Errorf("job requires a Slurm ID with an optional numeric array-task suffix")
 		}
 	case "task":
 		if !taskID.MatchString(args[1]) {
@@ -94,7 +94,7 @@ func validateArgs(args []string) error {
 		}
 	case "cancel":
 		if !cancelID.MatchString(args[1]) {
-			return fmt.Errorf("cancel requires a numeric Slurm ID or Perlmutter submission reference")
+			return fmt.Errorf("cancel requires a Slurm ID with an optional numeric array-task suffix or a Perlmutter submission reference")
 		}
 	}
 	return nil

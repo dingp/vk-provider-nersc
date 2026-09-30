@@ -313,6 +313,11 @@ sfapi-probe cancel SLURM_JOB_ID < /private/path/sf_api.json
 sfapi-probe prepare-image IMAGE@sha256:DIGEST < /private/path/sf_api.json
 ```
 
+For `job` and `cancel`, `SLURM_JOB_ID` accepts a numeric job ID such as `12345`
+or an individual array-task ID such as `12345_7` (including `12345_0`).
+`cancel` also accepts a submission reference such as
+`sfapi-task:perlmutter:TASK_ID`.
+
 Run it via `kubectl exec -i` inside the physical provider Pod when testing the
 allowlisted provider egress path. It prints no access tokens. Account checks may
 contain identity/allocation metadata; retain only fields needed for evidence.

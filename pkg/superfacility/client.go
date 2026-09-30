@@ -474,6 +474,12 @@ func (c *Client) cancelTask(ctx context.Context, taskID string) error {
 }
 
 func (c *Client) FetchJobLogs(ctx context.Context, jobID string) (string, error) {
+	return c.FetchJobLogsWithResolution(ctx, jobID, nil)
+}
+
+// FetchJobLogsWithResolution reports a resolved Slurm ID before querying compute
+// accounting or downloading logs, so callers can retain it even on failure.
+func (c *Client) FetchJobLogsWithResolution(ctx context.Context, jobID string, onResolved func(string)) (string, error) {
 	machine := "perlmutter"
 	slurmJobID := jobID
 	if taskMachine, taskID, ok := parseTaskJobRef(jobID); ok {
@@ -487,6 +493,9 @@ func (c *Client) FetchJobLogs(ctx context.Context, jobID string) (string, error)
 			slurmJobID = extractSlurmJobID(task.Result)
 			if slurmJobID == "" {
 				return task.Result, nil
+			}
+			if onResolved != nil {
+				onResolved(slurmJobID)
 			}
 		case "failed", "cancelled", "canceled":
 			return task.Result, nil

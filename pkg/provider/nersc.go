@@ -383,7 +383,7 @@ func (p *NerscProvider) clientForPodState(ctx context.Context, key string, state
 	return client, token, nil
 }
 
-// Status polling, log following, and cancellation can discover a Slurm ID. Persist it
+// Status polling, log requests, and cancellation can discover a Slurm ID. Persist it
 // against the same submission identity, never against a same-name replacement.
 func (p *NerscProvider) retainResolvedJobID(key string, state *podJobState, resolved string) {
 	original := state.jobID
@@ -403,6 +403,28 @@ func (p *NerscProvider) retainResolvedJobID(key string, state *podJobState, reso
 func (p *NerscProvider) jobIDForPodKey(key string) (string, bool) {
 	state, exists := p.jobStateForPodKey(key)
 	return state.jobID, exists
+}
+
+func (p *NerscProvider) jobStatusForPodState(ctx context.Context, client jobClient, key string, state *podJobState) (string, error) {
+	if resolving, ok := client.(interface {
+		GetJobStatusWithResolution(context.Context, string, func(string)) (string, error)
+	}); ok {
+		return resolving.GetJobStatusWithResolution(ctx, state.jobID, func(resolved string) {
+			p.retainResolvedJobID(key, state, resolved)
+		})
+	}
+	return client.GetJobStatus(ctx, state.jobID)
+}
+
+func (p *NerscProvider) logsForPodState(ctx context.Context, client jobClient, key string, state *podJobState) (string, error) {
+	if resolving, ok := client.(interface {
+		FetchJobLogsWithResolution(context.Context, string, func(string)) (string, error)
+	}); ok {
+		return resolving.FetchJobLogsWithResolution(ctx, state.jobID, func(resolved string) {
+			p.retainResolvedJobID(key, state, resolved)
+		})
+	}
+	return client.FetchJobLogs(ctx, state.jobID)
 }
 
 func (p *NerscProvider) jobStateForPodKey(key string) (podJobState, bool) {
@@ -440,7 +462,7 @@ func (p *NerscProvider) GetPod(ctx context.Context, namespace, name string) (*co
 		return nil, fmt.Errorf("create Superfacility client for pod %s: %w", key, err)
 	}
 
-	status, err := client.GetJobStatus(ctx, state.jobID)
+	status, err := p.jobStatusForPodState(ctx, client, key, &state)
 	if err != nil {
 		log.Printf("Failed to get status for pod %s job %s: %v", key, state.jobID, err)
 		return nil, err
@@ -485,7 +507,7 @@ func (p *NerscProvider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 			log.Printf("Failed to create Superfacility client for pod %s: %v", key, err)
 			continue
 		}
-		status, err := client.GetJobStatus(ctx, state.jobID)
+		status, err := p.jobStatusForPodState(ctx, client, key, &state)
 		if err != nil {
 			log.Printf("Failed to get status for job %s: %v", state.jobID, err)
 			continue
@@ -587,7 +609,7 @@ func (p *NerscProvider) GetPodLogs(ctx context.Context, namespace, name, contain
 		return p.followPodLogs(ctx, client, key, state), nil
 	}
 
-	logs, err := client.FetchJobLogs(ctx, state.jobID)
+	logs, err := p.logsForPodState(ctx, client, key, &state)
 	if err != nil {
 		return nil, err
 	}
@@ -607,17 +629,7 @@ func (p *NerscProvider) followPodLogs(ctx context.Context, client jobClient, key
 			if current, ok := p.jobStateForPodKey(key); ok && current.pod == state.pod {
 				state.jobID = current.jobID
 			}
-			var status string
-			var err error
-			if resolving, ok := client.(interface {
-				GetJobStatusWithResolution(context.Context, string, func(string)) (string, error)
-			}); ok {
-				status, err = resolving.GetJobStatusWithResolution(ctx, state.jobID, func(resolved string) {
-					p.retainResolvedJobID(key, &state, resolved)
-				})
-			} else {
-				status, err = client.GetJobStatus(ctx, state.jobID)
-			}
+			status, err := p.jobStatusForPodState(ctx, client, key, &state)
 			if err != nil {
 				var unresolved *superfacility.UnresolvedSubmissionError
 				if errors.As(err, &unresolved) {
@@ -628,7 +640,7 @@ func (p *NerscProvider) followPodLogs(ctx context.Context, client jobClient, key
 				return
 			}
 			if isTerminalJobStatus(status) {
-				logs, err := client.FetchJobLogs(ctx, state.jobID)
+				logs, err := p.logsForPodState(ctx, client, key, &state)
 				if err != nil {
 					_ = writer.CloseWithError(err)
 					return

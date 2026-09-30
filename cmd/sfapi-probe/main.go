@@ -186,7 +186,11 @@ func authenticate(ctx context.Context, input io.Reader) (probeClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("SFAPI token exchange failed; check expiry, source allowlist, and clock")
 	}
-	endpoint := "https://api.nersc.gov/api/v1.2"
+	endpoint := strings.TrimSpace(os.Getenv("SF_API_ENDPOINT"))
+	if endpoint == "" {
+		endpoint = "https://api.nersc.gov/api/v1.2"
+	}
+	endpoint = strings.TrimRight(endpoint, "/")
 	return &authenticatedClient{Client: superfacility.New(endpoint, token), token: token, endpoint: endpoint, http: &http.Client{Timeout: 30 * time.Second}}, nil
 }
 

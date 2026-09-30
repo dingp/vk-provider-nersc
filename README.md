@@ -319,7 +319,10 @@ or an individual array-task ID such as `12345_7` (including `12345_0`).
 `sfapi-task:perlmutter:TASK_ID`.
 
 Run it via `kubectl exec -i` inside the physical provider Pod when testing the
-allowlisted provider egress path. It prints no access tokens. Account checks may
+allowlisted provider egress path. The probe reads `SF_API_ENDPOINT` for all SFAPI
+operations, including direct diagnostics and cancellation; when unset or blank,
+it defaults to `https://api.nersc.gov/api/v1.2`. Its token exchange continues to use
+the NERSC OIDC service. It prints no access tokens. Account checks may
 contain identity/allocation metadata; retain only fields needed for evidence.
 `preflight` inspects scratch, Podman-HPC, and Slurm associations without submitting
 a compute job. `gpu-preflight ACCOUNT QOS` checks a one-node, four-GPU request with
